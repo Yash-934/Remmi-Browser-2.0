@@ -48,9 +48,7 @@ jobs:
         workspaces: rust
 
     - name: Build Native Rust Library
-      run: |
-        chmod +x ./tools/build-rust-android.sh
-        ./tools/build-rust-android.sh
+      run: bash ./tools/build-rust-android.sh
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
