@@ -70,3 +70,7 @@
 -keep class org.bouncycastle.** { *; }
 -dontwarn org.bouncycastle.**
 
+# JSoup Optional Dependencies
+-dontwarn com.google.re2j.**
+-dontwarn org.jsoup.**
+
