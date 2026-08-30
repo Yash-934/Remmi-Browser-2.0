@@ -42,7 +42,9 @@ class AdblockBridge {
   private val blockedHostnames = ConcurrentHashMap.newKeySet<String>()
   private val blockedSubstrings = CopyOnWriteArrayList<String>()
   private val allowList = ConcurrentHashMap.newKeySet<String>()
-  private val fallbackCosmeticRules = CopyOnWriteArrayList<Pair<String?, String>>() // domain (or null for generic) to selector
+  private val fallbackCosmeticRules = java.util.concurrent.CopyOnWriteArrayList<Pair<String?, String>>()
+  private val fallbackAdditionalCosmeticRules = java.util.concurrent.CopyOnWriteArrayList<Pair<String?, String>>()
+  private val fallbackProceduralFilters = java.util.concurrent.CopyOnWriteArrayList<String>() // domain (or null for generic) to selector
   private val fallbackCosmeticExceptions = ConcurrentHashMap.newKeySet<String>() // domain##selector or ##selector exception
 
   val totalBlockedCount = AtomicInteger(0)
@@ -198,7 +200,7 @@ class AdblockBridge {
       val rulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
         defaultPatterns.joinToString("\n")
       try {
-        nativeCompileRules(rulesText)
+        nativeCompileRules(rulesText, "")
       } catch (e: Throwable) {
         Log.e(TAG, "Failed to compile default rules into native engine", e)
       }
@@ -216,10 +218,10 @@ class AdblockBridge {
     }
   }
 
-  fun compileRules(rulesText: String): Int {
-    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] textLength=${rulesText.length}")
+  fun compileRules(defaultRulesText: String, additionalRulesText: String = ""): Int {
+    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] defaultLength=${defaultRulesText.length} additionalLength=${additionalRulesText.length}")
     
-    val validLines = rulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+    val validLines = (defaultRulesText.lines() + additionalRulesText.lines()).map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
     if (validLines.isEmpty()) {
       Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
       return 0
@@ -251,20 +253,20 @@ class AdblockBridge {
       "telemetry.", "tracking.", "statcounter.com"
     )
 
-    val defaultRulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
+    val builtinRulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
       defaultPatterns.joinToString("\n")
 
-    val combinedRulesText = if (rulesText.isNotBlank()) {
-      "$defaultRulesText\n$rulesText"
+    val combinedDefaultRulesText = if (defaultRulesText.isNotBlank()) {
+      "$builtinRulesText\n$defaultRulesText"
     } else {
-      defaultRulesText
+      builtinRulesText
     }
 
     var compiledCount = 0
     val oldGen = getEngineGeneration()
     if (isNativeLoaded) {
       try {
-        compiledCount = nativeCompileRules(combinedRulesText)
+        compiledCount = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
       } catch (e: Throwable) {
         Log.e(TAG, "Native compile rules failed: ${e.message}", e)
       }
@@ -283,18 +285,28 @@ class AdblockBridge {
     blockedSubstrings.addAll(defaultPatterns)
 
     // Also parse into Kotlin memory fallback
-    if (rulesText.isNotBlank()) {
-      rulesText.lines().forEach { line ->
+    fallbackAdditionalCosmeticRules.clear()
+    fallbackProceduralFilters.clear()
+    
+    fun parseToFallback(rules: String, isAdditional: Boolean) {
+      if (rules.isBlank()) return
+      rules.lines().forEach { line ->
         val trimmed = line.trim()
         if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
           if (trimmed.contains("#@#")) {
             fallbackCosmeticExceptions.add(trimmed)
+          } else if (trimmed.contains("#$#")) {
+            val parts = trimmed.split("#$#", limit = 2)
+            if (parts.size == 2 && parts[1].isNotBlank()) {
+              fallbackProceduralFilters.add(parts[1].trim())
+            }
           } else if (trimmed.contains("##")) {
             val parts = trimmed.split("##", limit = 2)
             val domain = parts[0].trim().ifEmpty { null }
             val selector = parts[1].trim()
             if (selector.isNotEmpty()) {
-              fallbackCosmeticRules.add(Pair(domain, selector))
+              if (isAdditional) fallbackAdditionalCosmeticRules.add(Pair(domain, selector))
+              else fallbackCosmeticRules.add(Pair(domain, selector))
             }
           } else if (trimmed.startsWith("@@")) {
             allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
@@ -307,6 +319,9 @@ class AdblockBridge {
         }
       }
     }
+    
+    parseToFallback(combinedDefaultRulesText, false)
+    parseToFallback(additionalRulesText, true)
     Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
     return compiledCount
   }
@@ -315,7 +330,8 @@ class AdblockBridge {
     url: String,
     classes: List<String> = emptyList(),
     ids: List<String> = emptyList(),
-    exceptions: List<String> = emptyList()
+    exceptions: List<String> = emptyList(),
+    aggressive: Boolean = false
   ): CosmeticResources {
     val currentGen = getEngineGeneration()
     if (isNativeLoaded) {
@@ -323,7 +339,7 @@ class AdblockBridge {
         val classesJson = org.json.JSONArray(classes).toString()
         val idsJson = org.json.JSONArray(ids).toString()
         val exceptionsJson = org.json.JSONArray(exceptions).toString()
-        val resultJson = nativeGetCosmeticResources(url, classesJson, idsJson, exceptionsJson)
+        val resultJson = nativeGetCosmeticResources(url, classesJson, idsJson, exceptionsJson, aggressive)
         if (resultJson.isNotBlank()) {
           val obj = org.json.JSONObject(resultJson)
           val ok = obj.optBoolean("ok", true)
@@ -376,25 +392,31 @@ class AdblockBridge {
     } catch (_: Exception) { "" }
 
     val hideList = mutableListOf<String>()
-    for ((domain, selector) in fallbackCosmeticRules) {
-      if (domain == null) {
-        // Generic rule
-        hideList.add(selector)
-      } else {
-        val domains = domain.split(",")
-        val matches = domains.any { d ->
-          val cleanD = d.trim().lowercase()
-          cleanD.isNotEmpty() && (host == cleanD || host.endsWith(".$cleanD"))
-        }
-        val isExcluded = domains.any { d ->
-          val cleanD = d.trim().lowercase()
-          cleanD.startsWith("~") && (host == cleanD.substring(1) || host.endsWith(".${cleanD.substring(1)}"))
-        }
-        if (matches && !isExcluded) {
-          hideList.add(selector)
+    val forceHideList = mutableListOf<String>()
+    
+    fun matchRules(rules: List<Pair<String?, String>>, targetList: MutableList<String>) {
+      for ((domain, selector) in rules) {
+        if (domain == null) {
+          targetList.add(selector)
+        } else {
+          val domains = domain.split(",")
+          val matches = domains.any { d ->
+            val cleanD = d.trim().lowercase()
+            cleanD.isNotEmpty() && (host == cleanD || host.endsWith(".$cleanD"))
+          }
+          val isExcluded = domains.any { d ->
+            val cleanD = d.trim().lowercase()
+            cleanD.startsWith("~") && (host == cleanD.substring(1) || host.endsWith(".${cleanD.substring(1)}"))
+          }
+          if (matches && !isExcluded) {
+            targetList.add(selector)
+          }
         }
       }
     }
+    
+    matchRules(fallbackCosmeticRules, hideList)
+    matchRules(fallbackAdditionalCosmeticRules, forceHideList)
 
     // Apply exceptions
     for (ex in fallbackCosmeticExceptions) {
@@ -404,17 +426,21 @@ class AdblockBridge {
         val exSelector = parts[1].trim()
         if (exDomain.isEmpty() || host == exDomain || host.endsWith(".$exDomain")) {
           hideList.remove(exSelector)
+          forceHideList.remove(exSelector)
         }
       }
     }
-
+    
+    // Also parse procedural filters manually for fallback
+    val proceduralList = if (aggressive) fallbackProceduralFilters.toList() else emptyList()
+    
     return CosmeticResources(
       ok = true,
       generation = currentGen,
       hideSelectors = hideList.distinct(),
-      forceHideSelectors = emptyList(),
-      procedural = emptyList(),
-      proceduralCount = 0,
+      forceHideSelectors = forceHideList.distinct(),
+      procedural = proceduralList,
+      proceduralCount = proceduralList.size,
       generics = true,
       error = null
     )
@@ -502,18 +528,18 @@ class AdblockBridge {
           val blocked = nativeMatches(url, sourceUrl, resourceType)
           if (blocked) {
             totalBlockedCount.incrementAndGet()
-            logSlowDecisionIfNeeded(startNs, resourceType)
-            return BlockDecision(
-              blocked = true,
-              ruleId = "native",
-              ruleSource = "RustEngine",
-              engineGeneration = currentGen
-            )
           }
+          logSlowDecisionIfNeeded(startNs, resourceType)
+          return BlockDecision(
+            blocked = blocked,
+            ruleId = "native",
+            ruleSource = "RustEngine",
+            engineGeneration = currentGen
+          )
         } catch (t: Throwable) {
           state = AdblockState.DEGRADED
           Log.e(TAG, "[ADBLOCK_DECISION_ERROR] ${t.javaClass.name}: ${t.message}", t)
-          throw t
+          // Fall through to Kotlin fallback on error
         }
       }
 
@@ -604,8 +630,8 @@ class AdblockBridge {
   // Native JNI functions implemented in rust/src/lib.rs
   private external fun nativeInit(): Boolean
   private external fun nativeMatches(url: String, sourceUrl: String, requestType: String): Boolean
-  private external fun nativeCompileRules(rulesText: String): Int
-  private external fun nativeGetCosmeticResources(url: String, classes: String, ids: String, exceptions: String): String
+  private external fun nativeCompileRules(defaultRules: String, additionalRules: String): Int
+  private external fun nativeGetCosmeticResources(url: String, classes: String, ids: String, exceptions: String, aggressive: Boolean): String
   private external fun nativeGetHiddenClassIdSelectors(classes: String, ids: String, exceptions: String): String
   private external fun nativeGetFilterCount(): Int
   private external fun nativeGetBlockedCount(): Int

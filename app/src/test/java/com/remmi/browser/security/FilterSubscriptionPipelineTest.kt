@@ -133,4 +133,43 @@ class FilterSubscriptionPipelineTest {
     val after = adblockBridge.evaluateDecision("https://resilient-ad-server.com/banner.js")
     assertTrue("Engine must retain previous rules after failed or empty compile", after.blocked)
   }
+
+  @Test
+  fun testGenericCosmeticRule() {
+    adblockBridge.compileRules("##.ad-banner\n##.sponsored-post")
+    val res = adblockBridge.getCosmeticResources("https://news.example.com/article")
+    assertTrue("Cosmetic lookup must succeed", res.ok)
+    assertTrue("Generic hide selector must be present", res.hideSelectors.contains(".ad-banner"))
+    assertTrue("Generic hide selector 2 must be present", res.hideSelectors.contains(".sponsored-post"))
+  }
+
+  @Test
+  fun testDomainSpecificCosmeticRule() {
+    adblockBridge.compileRules("example.com##.target-ad\nother.com##.other-ad")
+    val exampleRes = adblockBridge.getCosmeticResources("https://example.com/feed")
+    assertTrue("example.com must receive target-ad selector", exampleRes.hideSelectors.contains(".target-ad"))
+    assertFalse("example.com must not receive other-ad selector", exampleRes.hideSelectors.contains(".other-ad"))
+
+    val otherRes = adblockBridge.getCosmeticResources("https://other.com/feed")
+    assertTrue("other.com must receive other-ad selector", otherRes.hideSelectors.contains(".other-ad"))
+    assertFalse("other.com must not receive target-ad selector", otherRes.hideSelectors.contains(".target-ad"))
+  }
+
+  @Test
+  fun testCosmeticRuleException() {
+    adblockBridge.compileRules("##.global-ad\nexample.com#@#.global-ad")
+    val nonExemptRes = adblockBridge.getCosmeticResources("https://clean-site.org/page")
+    assertTrue("Non-exempt site must hide global-ad", nonExemptRes.hideSelectors.contains(".global-ad"))
+
+    val exemptRes = adblockBridge.getCosmeticResources("https://example.com/page")
+    assertFalse("Exempt site must not hide global-ad", exemptRes.hideSelectors.contains(".global-ad"))
+  }
+
+  @Test
+  fun testNoMatchDomainReturnsEmptySelectors() {
+    adblockBridge.compileRules("specific-domain.com##.specific-ad")
+    val res = adblockBridge.getCosmeticResources("https://unrelated-domain.com/index.html")
+    assertTrue("Lookup must succeed", res.ok)
+    assertFalse("Unrelated domain must not match specific ad selector", res.hideSelectors.contains(".specific-ad"))
+  }
 }

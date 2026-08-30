@@ -1,15 +1,10 @@
 // Remmi Engine Extension - Brave-style Cosmetic Filtering Content Script
-// Injects hide selectors at document_start and dynamically applies class/id cosmetic rules.
+// Injects hide selectors directly into document.head and dynamically applies class/id cosmetic rules.
 
 (function () {
   'use strict';
 
-  // Only run in HTML/XHTML web documents
-  if (
-    !window.location ||
-    (!window.location.protocol.startsWith('http') &&
-      !window.location.protocol.startsWith('https'))
-  ) {
+  if (!window.location || (!window.location.protocol.startsWith('http') && !window.location.protocol.startsWith('https'))) {
     return;
   }
 
@@ -19,42 +14,21 @@
   const SEEN_IDS = new Set();
   const INJECTED_SELECTORS = new Set();
 
-  let styleContainer = null;
   let styleTagIndex = 0;
   let isScanning = false;
   let scanTimer = null;
   let pendingClasses = [];
   let pendingIds = [];
 
-  function getOrCreateStyleContainer() {
-    if (styleContainer && styleContainer.isConnected) {
-      return styleContainer;
+  // Used to prevent extremely malformed selectors from crashing the style injection
+  function isSafeCssSelector(selector) {
+    if (!selector) return false;
+    // Basic sanity checks:
+    if (selector.includes('<') || selector.includes('>')) {
+       // > is valid in CSS, but < is not.
+       if (selector.includes('<')) return false;
     }
-    const target =
-      document.head || document.documentElement || document.body;
-    if (!target) return null;
-
-    let container = document.getElementById('remmi-cosmetic-container');
-    if (!container) {
-      container = document.createElement('div');
-      container.id = 'remmi-cosmetic-container';
-      container.style.display = 'none';
-      container.setAttribute('aria-hidden', 'true');
-      container.setAttribute('data-remmi-shield', 'cosmetic');
-      try {
-        if (target.firstChild) {
-          target.insertBefore(container, target.firstChild);
-        } else {
-          target.appendChild(container);
-        }
-      } catch (_e) {
-        try {
-          target.appendChild(container);
-        } catch (_e2) {}
-      }
-    }
-    styleContainer = container;
-    return styleContainer;
+    return true;
   }
 
   function injectSelectors(selectors) {
@@ -62,8 +36,8 @@
 
     const newSelectors = [];
     for (let i = 0; i < selectors.length; i++) {
-      const sel = selectors[i].trim();
-      if (sel && !INJECTED_SELECTORS.has(sel)) {
+      const sel = String(selectors[i]).trim();
+      if (sel && !INJECTED_SELECTORS.has(sel) && isSafeCssSelector(sel)) {
         INJECTED_SELECTORS.add(sel);
         newSelectors.push(sel);
       }
@@ -71,10 +45,9 @@
 
     if (newSelectors.length === 0) return;
 
-    const container = getOrCreateStyleContainer();
-    if (!container) {
-      // DOM might not have head/documentElement yet, schedule retry
-      setTimeout(() => injectSelectors(newSelectors), 20);
+    const root = document.head || document.documentElement;
+    if (!root) {
+      requestAnimationFrame(() => injectSelectors(newSelectors));
       return;
     }
 
@@ -83,18 +56,14 @@
       const styleEl = document.createElement('style');
       styleEl.id = `${STYLE_ID_PREFIX}${styleTagIndex++}`;
       styleEl.type = 'text/css';
-      styleEl.setAttribute('data-remmi-rules', String(chunk.length));
+      styleEl.setAttribute('data-remmi-cosmetic', '1');
 
-      // Rule: display: none !important
       const cssText = chunk.join(',\n') + ' { display: none !important; }\n';
       styleEl.textContent = cssText;
 
       try {
-        container.appendChild(styleEl);
-      } catch (_e) {
-        const root = document.head || document.documentElement;
-        if (root) root.appendChild(styleEl);
-      }
+        root.appendChild(styleEl);
+      } catch (_e) {}
     }
   }
 
@@ -110,16 +79,10 @@
         .then((response) => {
           if (response && response.ok) {
             const allHide = [];
-            if (
-              Array.isArray(response.hideSelectors) &&
-              response.hideSelectors.length > 0
-            ) {
+            if (Array.isArray(response.hideSelectors) && response.hideSelectors.length > 0) {
               allHide.push(...response.hideSelectors);
             }
-            if (
-              Array.isArray(response.forceHideSelectors) &&
-              response.forceHideSelectors.length > 0
-            ) {
+            if (Array.isArray(response.forceHideSelectors) && response.forceHideSelectors.length > 0) {
               allHide.push(...response.forceHideSelectors);
             }
             if (allHide.length > 0) {
@@ -127,13 +90,10 @@
             }
           }
         })
-        .catch((_e) => {
-          // Native or background communication error; fail-safe
-        });
+        .catch((_e) => {});
     } catch (_err) {}
   }
 
-  // Flush dynamic classes and IDs to background for hidden class/id selector matching
   function flushDynamicSelectors() {
     if (pendingClasses.length === 0 && pendingIds.length === 0) return;
 
@@ -150,16 +110,10 @@
         .then((response) => {
           if (response && response.ok) {
             const allHide = [];
-            if (
-              Array.isArray(response.hideSelectors) &&
-              response.hideSelectors.length > 0
-            ) {
+            if (Array.isArray(response.hideSelectors) && response.hideSelectors.length > 0) {
               allHide.push(...response.hideSelectors);
             }
-            if (
-              Array.isArray(response.forceHideSelectors) &&
-              response.forceHideSelectors.length > 0
-            ) {
+            if (Array.isArray(response.forceHideSelectors) && response.forceHideSelectors.length > 0) {
               allHide.push(...response.forceHideSelectors);
             }
             if (allHide.length > 0) {
@@ -175,54 +129,49 @@
     if (scanTimer) return;
     scanTimer = setTimeout(() => {
       scanTimer = null;
-      scanDocumentForClassesAndIds();
+      flushDynamicSelectors();
     }, 150);
   }
 
-  function scanDocumentForClassesAndIds() {
-    if (isScanning) return;
-    isScanning = true;
+  function collectNode(node) {
+    if (!(node instanceof Element)) return;
+    let foundNew = false;
 
-    try {
-      const elements = document.querySelectorAll('[class], [id]');
-      let foundNew = false;
+    const id = node.id;
+    if (id && typeof id === 'string' && id.length < 120 && !SEEN_IDS.has(id)) {
+      SEEN_IDS.add(id);
+      pendingIds.push(id);
+      foundNew = true;
+    }
 
-      for (let i = 0; i < elements.length; i++) {
-        const el = elements[i];
-
-        // Process IDs
-        const id = el.id;
-        if (id && !SEEN_IDS.has(id) && id.length < 120) {
-          SEEN_IDS.add(id);
-          pendingIds.push(id);
+    if (node.classList && node.classList.length > 0) {
+      for (let j = 0; j < node.classList.length; j++) {
+        const cls = node.classList[j];
+        if (cls && typeof cls === 'string' && cls.length < 120 && !SEEN_CLASSES.has(cls)) {
+          SEEN_CLASSES.add(cls);
+          pendingClasses.push(cls);
           foundNew = true;
         }
-
-        // Process Classes
-        const className = el.className;
-        if (className && typeof className === 'string') {
-          const parts = className.split(/\s+/);
-          for (let j = 0; j < parts.length; j++) {
-            const cls = parts[j].trim();
-            if (cls && !SEEN_CLASSES.has(cls) && cls.length < 120) {
-              SEEN_CLASSES.add(cls);
-              pendingClasses.push(cls);
-              foundNew = true;
-            }
-          }
-        }
       }
-
-      if (foundNew) {
-        flushDynamicSelectors();
-      }
-    } catch (_e) {
-    } finally {
-      isScanning = false;
     }
+
+    return foundNew;
   }
 
-  // Monitor DOM modifications for dynamically loaded ads / tracker elements
+  function collectNodeTree(rootNode) {
+    let foundNew = collectNode(rootNode);
+    if (rootNode.querySelectorAll) {
+      const elements = rootNode.querySelectorAll('[class], [id]');
+      for (let i = 0; i < elements.length; i++) {
+        if (collectNode(elements[i])) {
+          foundNew = true;
+        }
+      }
+    }
+    return foundNew;
+  }
+
+  // Monitor DOM modifications incrementally
   function setupMutationObserver() {
     const target = document.documentElement || document;
     if (!target) {
@@ -234,30 +183,20 @@
       let shouldScan = false;
       for (let i = 0; i < mutations.length; i++) {
         const m = mutations[i];
-        if (m.type === 'childList' && m.addedNodes.length > 0) {
-          shouldScan = true;
-          break;
-        } else if (
-          m.type === 'attributes' &&
-          (m.attributeName === 'class' || m.attributeName === 'id')
-        ) {
-          shouldScan = true;
-          break;
+        if (m.type === 'childList') {
+          for (let j = 0; j < m.addedNodes.length; j++) {
+            if (collectNodeTree(m.addedNodes[j])) {
+              shouldScan = true;
+            }
+          }
+        } else if (m.type === 'attributes') {
+          if (collectNode(m.target)) {
+            shouldScan = true;
+          }
         }
       }
       if (shouldScan) {
         scheduleScan();
-      }
-
-      // Safeguard: Ensure styleContainer remains attached
-      if (styleContainer && !styleContainer.isConnected) {
-        const root =
-          document.head || document.documentElement || document.body;
-        if (root) {
-          try {
-            root.appendChild(styleContainer);
-          } catch (_e) {}
-        }
       }
     });
 
@@ -269,23 +208,18 @@
     });
   }
 
-  // Initial trigger at document_start
-  fetchInitialCosmetics();
-
-  if (
-    document.readyState === 'interactive' ||
-    document.readyState === 'complete'
-  ) {
+  function startCosmeticPipeline() {
     setupMutationObserver();
-    scheduleScan();
-  } else {
-    document.addEventListener(
-      'DOMContentLoaded',
-      () => {
-        setupMutationObserver();
+    
+    // Initial scan of whatever is already in the DOM (very early at document_start usually just <html> or <head>)
+    if (document.documentElement) {
+      if (collectNodeTree(document.documentElement)) {
         scheduleScan();
-      },
-      { once: true }
-    );
+      }
+    }
+    
+    fetchInitialCosmetics();
   }
+
+  startCosmeticPipeline();
 })();

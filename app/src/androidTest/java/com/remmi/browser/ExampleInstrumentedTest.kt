@@ -129,5 +129,31 @@ class ExampleInstrumentedTest {
     )
     assertTrue("Valid engine must survive empty/failed update", afterDecision.blocked)
   }
+
+  @Test
+  fun test6_nativeCosmeticResourceLookup() {
+    val adblockBridge = AdblockBridge.getInstance()
+    assertTrue("Native engine required", adblockBridge.isNativeAvailable())
+
+    adblockBridge.compileRules("example.com##.native-banner\n##.universal-hide")
+    val res = adblockBridge.getCosmeticResources("https://example.com/index.html")
+    assertTrue("Cosmetic query must succeed", res.ok)
+    assertTrue("Should contain domain-specific selector", res.hideSelectors.contains(".native-banner"))
+    assertTrue("Should contain generic selector", res.hideSelectors.contains(".universal-hide"))
+    assertTrue("Generation should be valid", res.generation > 0)
+  }
+
+  @Test
+  fun test7_nativeHiddenClassIdLookup() {
+    val adblockBridge = AdblockBridge.getInstance()
+    assertTrue("Native engine required", adblockBridge.isNativeAvailable())
+
+    val hidden = adblockBridge.getHiddenClassIdSelectors(
+      classes = listOf("ad-slot", "main-content"),
+      ids = listOf("sponsor-box", "footer"),
+      exceptions = emptyList()
+    )
+    assertTrue("Hidden class/id query must return valid object", hidden.ok)
+  }
 }
 

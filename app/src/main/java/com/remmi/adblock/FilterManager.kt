@@ -204,7 +204,8 @@ class FilterManager(
     mutex.withLock {
       val dir = filterDir ?: return@withLock 0
       Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
-      val combinedRules = StringBuilder()
+      val defaultRules = StringBuilder()
+      val additionalRules = StringBuilder()
       val rulesSummary = StringBuilder()
       for (sub in _subscriptions.value) {
         if (sub.enabled) {
@@ -217,7 +218,11 @@ class FilterManager(
               Log.d(TAG, "[ADBLOCK_PARSE] name=${sub.id} inputLines=${lines.size} validRules=$lineCount")
               Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} rules=$lineCount")
               rulesSummary.append("${sub.id}=$lineCount ")
-              combinedRules.append(content).append("\n")
+              if (sub.id == "easylist" || sub.id == "easyprivacy") {
+                defaultRules.append(content).append("\n")
+              } else {
+                additionalRules.append(content).append("\n")
+              }
             } catch (e: Exception) {
               Log.e(TAG, "Failed reading cached filter ${sub.id}: ${e.message}")
             }
@@ -227,8 +232,8 @@ class FilterManager(
           }
         }
       }
-      if (combinedRules.isNotBlank()) {
-        val compiled = adblockBridge.compileRules(combinedRules.toString())
+      if (defaultRules.isNotBlank() || additionalRules.isNotBlank()) {
+        val compiled = adblockBridge.compileRules(defaultRules.toString(), additionalRules.toString())
         Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
         logAdblockStatus()
