@@ -42,6 +42,13 @@ class PrivacyNetworkController private constructor(private val context: Context)
     }
   }
 
+  fun isTorLockedOut(): Boolean = torManager.isLockedOut()
+
+  fun resetTorFailures() {
+    torManager.resetFailures()
+    DebugLogManager.log("[ROUTE] Tor failure state manually reset by user.")
+  }
+
   /**
    * Enters Ghost Mode transactionally with Fail-Closed guarantee:
    * 1. Closes existing session to prevent clearnet leakage.
@@ -52,9 +59,16 @@ class PrivacyNetworkController private constructor(private val context: Context)
    */
   suspend fun enterGhostMode(tabId: String): Result<Int> = transitionMutex.withLock {
     withContext(Dispatchers.IO) {
+      if (torManager.isLockedOut()) {
+        val errorMsg = "Maximum Tor start attempts exceeded. Reset required (tap RETRY to reset)."
+        Log.w(TAG, "Ghost Mode admission rejected: $errorMsg")
+        DebugLogManager.log("[ROUTE] ADMISSION_REJECTED reason=locked_out tabId=$tabId")
+        return@withContext Result.failure(IllegalStateException(errorMsg))
+      }
+
       Log.i(TAG, "Entering Ghost Mode for tab $tabId (enforcing fail-closed Tor routing)...")
       val generation = CurrentTorRoute.markStartingGhost()
-    DebugLogManager.log("[ROUTE] REQUESTED profile=GHOST tabId=$tabId generation=$generation")
+      DebugLogManager.log("[ROUTE] REQUESTED profile=GHOST tabId=$tabId generation=$generation")
 
     // Step 1: Terminate active clearnet session first
     geckoEngine.closeSessionSafely(tabId)

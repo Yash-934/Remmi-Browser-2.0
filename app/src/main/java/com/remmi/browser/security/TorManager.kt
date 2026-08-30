@@ -478,6 +478,8 @@ class TorManager(private val context: Context) {
     consecutiveStartFailures = 0
   }
 
+  fun isLockedOut(): Boolean = consecutiveStartFailures >= MAX_START_ATTEMPTS
+
   fun isOrbotInstalled(): Boolean {
     return try {
       val pm = context.packageManager

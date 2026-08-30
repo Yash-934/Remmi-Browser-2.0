@@ -683,7 +683,12 @@ fun BrowserScreen(
             androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(24.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(horizontal = 16.dp)) {
               Button(
-                onClick = { scope.launch { privacyController.enterGhostMode(activeTab.id) } },
+                onClick = {
+                  scope.launch {
+                    privacyController.resetTorFailures()
+                    privacyController.enterGhostMode(activeTab.id)
+                  }
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = ThemeCyber.colors.torPurple),
                 shape = RoundedCornerShape(6.dp),
               ) {
@@ -1867,7 +1872,10 @@ fun BrowserScreen(
           scope.launch { privacyController.rotateTorCircuit() }
         },
         onStartTor = {
-          scope.launch { privacyController.enterGhostMode(activeTab.id) }
+          scope.launch {
+            privacyController.resetTorFailures()
+            privacyController.enterGhostMode(activeTab.id)
+          }
         },
         onLaunchOrbot = {
           torManager.getOrbotStartIntent()?.let { intent ->

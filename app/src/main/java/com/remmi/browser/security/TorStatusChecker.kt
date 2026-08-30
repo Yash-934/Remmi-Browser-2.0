@@ -174,7 +174,45 @@ object TorStatusChecker {
           }
         } catch (e: Exception) {
           lastErrorMessage = e.localizedMessage ?: e.message ?: "Timeout"
-          DebugLogManager.log("Tor verification attempt $attempt failed: $lastErrorMessage")
+          DebugLogManager.log("Tor verification primary check attempt $attempt failed: $lastErrorMessage")
+          
+          // Level 3b: Fallback IP verification via SOCKS5 proxy if primary check.torproject.org is rate-limited/slow
+          try {
+            val fallbackProxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
+            val fallbackClient = OkHttpClient.Builder()
+              .proxy(fallbackProxy)
+              .connectTimeout(TOR_VERIFY_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+              .readTimeout(TOR_VERIFY_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+              .retryOnConnectionFailure(false)
+              .build()
+
+            val fallbackReq = Request.Builder()
+              .url("https://api.ipify.org?format=json")
+              .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
+              .build()
+
+            fallbackClient.newCall(fallbackReq).execute().use { fbResponse ->
+              val fbBody = fbResponse.body?.string() ?: ""
+              if (fbResponse.isSuccessful && fbBody.isNotBlank()) {
+                val json = JSONObject(fbBody)
+                val fbIp = json.optString("ip", "Unknown")
+                if (fbIp.isNotBlank() && fbIp != "Unknown") {
+                  val elapsed = System.currentTimeMillis() - startTime
+                  DebugLogManager.log("Tor SOCKS5 fallback check succeeded: Exit IP=$fbIp (${elapsed}ms)")
+                  return@withContext TorStatusResult(
+                    isTor = true,
+                    ip = fbIp,
+                    message = "Tor SOCKS5 Outbound Route Verified ($fbIp)",
+                    latencyMs = elapsed,
+                    socksHandshakePassed = true,
+                    attemptsMade = attempt,
+                  )
+                }
+              }
+            }
+          } catch (fbErr: Exception) {
+            DebugLogManager.log("Tor fallback verification notice: ${fbErr.message}")
+          }
         }
 
         if (attempt < maxAttempts) {

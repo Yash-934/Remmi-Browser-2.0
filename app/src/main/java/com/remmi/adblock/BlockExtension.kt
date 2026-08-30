@@ -107,6 +107,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     message: Any,
     sender: WebExtension.MessageSender
   ): org.mozilla.geckoview.GeckoResult<Any>? {
+    if (nativeApp != "remmi_engine_extension") {
+      Log.w(TAG, "[WEBEXT_REJECTED] Unknown nativeApp=$nativeApp sender=${sender.webExtension.id}")
+      return org.mozilla.geckoview.GeckoResult.fromValue(JSONObject().apply { put("error", "unauthorized_app") })
+    }
+
     val messageJson = when (message) {
       is JSONObject -> message
       is Map<*, *> -> try { JSONObject(message) } catch (_: Exception) { null }
@@ -115,14 +120,14 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     }
 
     val type = messageJson?.optString("type") ?: ""
-    Log.d(TAG, "[WEBEXT_IN] app=$nativeApp type=$type messageClass=${message.javaClass.simpleName}")
+    Log.d(TAG, "[WEBEXT_NATIVE_IN] app=$nativeApp type=$type messageClass=${message.javaClass.simpleName} env=${sender.environmentType}")
 
     if (type == "SHOULD_BLOCK") {
       val url = messageJson?.optString("url") ?: ""
       val sourceUrl = messageJson?.optString("sourceUrl") ?: ""
       val resourceType = messageJson?.optString("resourceType") ?: "other"
 
-      Log.d(TAG, "[WEBEXT_SHOULD_BLOCK] resourceType=$resourceType")
+      Log.d(TAG, "[WEBEXT_NATIVE_DECISION_START] resourceType=$resourceType urlLen=${url.length}")
       val result = org.mozilla.geckoview.GeckoResult<Any>()
 
       extensionScope.launch {
@@ -133,11 +138,12 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
 
           val blocked = if (bypass) false else adblockBridge.shouldBlock(url, sourceUrl, resourceType)
-          Log.d(TAG, "[WEBEXT_OUT] resourceType=$resourceType blocked=$blocked")
+          Log.d(TAG, "[WEBEXT_NATIVE_DECISION_END] resourceType=$resourceType blocked=$blocked bypass=$bypass")
           val responseObj = JSONObject().apply { put("cancel", blocked) }
           result.complete(responseObj)
+          Log.d(TAG, "[WEBEXT_NATIVE_COMPLETE] resourceType=$resourceType")
         } catch (t: Throwable) {
-          Log.e(TAG, "[WEBEXT_NATIVE_ERROR] type=$resourceType error=${t.javaClass.name}: ${t.message}", t)
+          Log.e(TAG, "[WEBEXT_NATIVE_EXCEPTION] type=$resourceType error=${t.javaClass.name}: ${t.message}", t)
           val fallbackObj = JSONObject().apply {
             put("cancel", false)
             put("error", true)
