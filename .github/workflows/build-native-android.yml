@@ -3,13 +3,9 @@ name: Build Native Android
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'rust/**'
-      - 'app/src/main/jniLibs/**'
   pull_request:
-    paths:
-      - 'rust/**'
-      - 'app/src/main/jniLibs/**'
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
