@@ -182,43 +182,58 @@ object NetworkHardening {
     DebugLogManager.log("[ROUTE] APPLY_START profile=GHOST port=$port generation=$generation")
     Log.i(TAG, "Enforcing native Gecko Tor SOCKS5 on 127.0.0.1:$port (failover_direct=false, generation=$generation)")
 
-    val prefs = getTorPreferences(port, settings)
     val prefController = GeckoPreferenceController(runtime)
-    val applied = prefController.applyPreferences(prefs, GeckoPreferenceController.PREF_BRANCH_USER)
 
-    if (applied) {
-      val verifyKeys = listOf(
-        "network.proxy.type",
-        "network.proxy.socks",
-        "network.proxy.socks_port",
-        "network.proxy.socks_version",
-        "network.proxy.socks_remote_dns",
-        "network.proxy.socks5_remote_dns",
-        "network.proxy.failover_direct",
-        "network.proxy.no_proxies_on"
-      )
-      val readBack = prefController.getPreferences(verifyKeys)
-      val isReadbackValid = readBack["network.proxy.type"] == 1 &&
-        readBack["network.proxy.socks"] == "127.0.0.1" &&
-        readBack["network.proxy.socks_port"] == port &&
-        readBack["network.proxy.socks_version"] == 5 &&
-        readBack["network.proxy.socks5_remote_dns"] == true &&
-        readBack["network.proxy.failover_direct"] == false &&
-        readBack["network.proxy.no_proxies_on"] == ""
-      
-      if (!isReadbackValid) {
-        Log.e(TAG, "Critical Ghost preferences readback failed! Expected proxy on $port but got: $readBack")
-        DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST reason=readback_mismatch readback=$readBack")
-        return false
-      }
-
-      DebugLogManager.log("[ROUTE] GEOCKO_PREF_READBACK_OK")
-      lastAppliedRouteKey = targetKey
-      DebugLogManager.log("[ROUTE] NATIVE_GECKO_APPLIED profile=GHOST port=$port")
-    } else {
-      DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST port=$port")
+    // Phase A: Mandatory Tor SOCKS5 routing preferences (FAIL-CLOSED)
+    val routingPrefs = getMandatoryTorRoutingPreferences(port)
+    val routingApplied = prefController.applyPreferences(routingPrefs, GeckoPreferenceController.PREF_BRANCH_USER)
+    if (!routingApplied) {
+      Log.e(TAG, "Critical Phase A (Mandatory Tor SOCKS5 routing) failed to apply on port $port")
+      DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST reason=phase_a_routing_failed port=$port")
+      return false
     }
-    return applied
+    DebugLogManager.log("[ROUTE] PHASE_A_ROUTING_APPLIED port=$port")
+
+    // Phase B: Hardened privacy & fingerprinting preferences
+    val privacyPrefs = getHardenedPrivacyPreferences(settings)
+    val privacyApplied = prefController.applyPreferences(privacyPrefs, GeckoPreferenceController.PREF_BRANCH_USER)
+    if (!privacyApplied) {
+      Log.w(TAG, "Phase B (Privacy Hardening) reported some failed preferences; checking critical routing integrity")
+    } else {
+      DebugLogManager.log("[ROUTE] PHASE_B_PRIVACY_APPLIED")
+    }
+
+    val verifyKeys = listOf(
+      "network.proxy.type",
+      "network.proxy.socks",
+      "network.proxy.socks_port",
+      "network.proxy.socks_version",
+      "network.proxy.socks_remote_dns",
+      "network.proxy.socks5_remote_dns",
+      "network.proxy.failover_direct",
+      "network.proxy.allow_bypass",
+      "network.proxy.no_proxies_on"
+    )
+    val readBack = prefController.getPreferences(verifyKeys)
+    val isReadbackValid = readBack["network.proxy.type"] == 1 &&
+      readBack["network.proxy.socks"] == "127.0.0.1" &&
+      readBack["network.proxy.socks_port"] == port &&
+      readBack["network.proxy.socks_version"] == 5 &&
+      readBack["network.proxy.socks5_remote_dns"] == true &&
+      readBack["network.proxy.failover_direct"] == false &&
+      readBack["network.proxy.allow_bypass"] == false &&
+      readBack["network.proxy.no_proxies_on"] == ""
+    
+    if (!isReadbackValid) {
+      Log.e(TAG, "Critical Ghost preferences readback failed! Expected proxy on $port but got: $readBack")
+      DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST reason=readback_mismatch readback=$readBack")
+      return false
+    }
+
+    DebugLogManager.log("[ROUTE] GEOCKO_PREF_READBACK_OK")
+    lastAppliedRouteKey = targetKey
+    DebugLogManager.log("[ROUTE] NATIVE_GECKO_APPLIED profile=GHOST port=$port")
+    return true
   }
 
   suspend fun applyShieldNetworkSettings(
