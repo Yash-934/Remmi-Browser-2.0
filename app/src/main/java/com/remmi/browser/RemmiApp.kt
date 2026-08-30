@@ -1,0 +1,67 @@
+package com.remmi.browser
+
+import android.app.Application
+import android.util.Log
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
+import coil3.request.crossfade
+import com.remmi.adblock.AdblockBridge
+import com.remmi.browser.engine.GeckoEngineManager
+import com.remmi.browser.security.CurrentTorRoute
+import com.remmi.browser.security.NetworkRouteAuthority
+import com.remmi.browser.storage.RemmiDatabase
+import com.remmi.browser.storage.SettingsRepository
+import okhttp3.Call
+import java.io.File
+import java.util.concurrent.Executors
+
+class RemmiApp : Application(), SingletonImageLoader.Factory {
+
+  override fun newImageLoader(context: coil3.PlatformContext): ImageLoader {
+    val callFactory = Call.Factory { request ->
+      val targetUrl = request.url.toString()
+      val isGhost = CurrentTorRoute.isGhostActive || NetworkRouteAuthority.isOnionDestination(targetUrl)
+      val client = NetworkRouteAuthority.createHttpClient(
+        isGhost = isGhost,
+        targetUrl = targetUrl,
+        connectTimeoutSeconds = 10L,
+        readTimeoutSeconds = 15L
+      )
+      client.newCall(request)
+    }
+
+    return ImageLoader.Builder(context)
+      .components {
+        add(coil3.network.okhttp.OkHttpNetworkFetcherFactory(callFactory = callFactory))
+      }
+      .crossfade(true)
+      .build()
+  }
+
+  override fun onCreate() {
+    super.onCreate()
+
+    // Global Uncaught Exception Handler to capture crash logs & export to Downloads
+    com.remmi.browser.util.CrashHandlerHelper.install(this)
+
+    // Initialize local storage and settings in background to keep startup instant
+    val executor = Executors.newSingleThreadExecutor { r ->
+      Thread(r, "RemmiApp-Init").apply {
+        priority = Thread.MIN_PRIORITY
+      }
+    }
+    executor.execute {
+      try {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        Log.i("RemmiApp", "Background initialization started...")
+        AdblockBridge.getInstance()
+        RemmiDatabase.bootstrap(this)
+        SettingsRepository.getInstance(this)
+        Log.i("RemmiApp", "Background initialization completed.")
+      } catch (e: Throwable) {
+        Log.e("RemmiApp", "Error during background init: ${e.message}", e)
+      }
+    }
+  }
+}
+
