@@ -453,13 +453,13 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
 
     if let Some(ref engine) = *default_guard {
         let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-        hide_selectors.extend(hidden.hide_selectors);
+        hide_selectors.extend(hidden);
     }
 
     if let Some(guard) = additional_guard {
         if let Some(ref engine) = *guard {
             let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-            force_hide_selectors.extend(hidden.hide_selectors);
+            force_hide_selectors.extend(hidden);
         }
     }
 
