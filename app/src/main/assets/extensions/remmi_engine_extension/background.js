@@ -3,6 +3,8 @@
 // The WebExtension does NOT modify browser.proxy or route settings.
 
 let port = null;
+let isConnecting = false;
+let reconnectTimer = null;
 const pendingMessages = [];
 
 function logToNative(msg) {
@@ -27,10 +29,18 @@ function flushPendingMessages() {
 }
 
 function connectNative() {
+  if (isConnecting) return;
+  isConnecting = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   try {
     port = browser.runtime.connectNative("remmi_engine_extension");
     if (!port) {
       console.warn("[Remmi] connectNative returned null");
+      isConnecting = false;
       return;
     }
     console.log("[Remmi] connectNative SUCCESS");
@@ -44,6 +54,7 @@ function connectNative() {
     } catch (_err) {}
 
     flushPendingMessages();
+    isConnecting = false;
 
     port.onMessage.addListener((msg) => {
       if (!msg) return;
@@ -78,11 +89,18 @@ function connectNative() {
     port.onDisconnect.addListener(() => {
       console.warn("[Remmi] connectNative onDisconnect");
       port = null;
-      setTimeout(connectNative, 3000);
+      isConnecting = false;
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(connectNative, 3000);
+      }
     });
   } catch (_e) {
     console.error("[Remmi] connectNative FAILED", _e);
-    setTimeout(connectNative, 5000);
+    port = null;
+    isConnecting = false;
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(connectNative, 5000);
+    }
   }
 }
 
@@ -149,9 +167,11 @@ browser.webRequest.onBeforeRequest.addListener(
         return { cancel: true };
       }
     } catch (e) {
-      logToNative(`[WEBEXT] SHOULD_BLOCK failed type=${details.type}`);
-      // Fail-closed invariant: block on native bridge error to prevent data leak in secure profiles
-      return { cancel: true };
+      logToNative(
+        `[WEBEXT] SHOULD_BLOCK_ERROR type=${details.type} name=${e?.name || "unknown"} message=${e?.message || String(e)}`
+      );
+      // Controlled fallback: Allow request to proceed if bridge fails so stylesheets/scripts are not canceled
+      return { cancel: false };
     }
     
     return { cancel: false };

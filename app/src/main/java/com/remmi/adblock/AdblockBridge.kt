@@ -1,9 +1,9 @@
 package com.remmi.adblock
 
 import android.util.Log
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -12,10 +12,9 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class AdblockBridge {
 
-  private val mutex = Mutex()
-  private val blockedHostnames = mutableSetOf<String>()
-  private val blockedSubstrings = mutableListOf<String>()
-  private val allowList = mutableSetOf<String>()
+  private val blockedHostnames = ConcurrentHashMap.newKeySet<String>()
+  private val blockedSubstrings = CopyOnWriteArrayList<String>()
+  private val allowList = ConcurrentHashMap.newKeySet<String>()
 
   val totalBlockedCount = AtomicInteger(0)
   var isNativeLoaded: Boolean = false
@@ -87,7 +86,7 @@ class AdblockBridge {
     }
   }
 
-  suspend fun addCustomRule(rule: String) = mutex.withLock {
+  fun addCustomRule(rule: String) {
     val trimmed = rule.trim()
     if (trimmed.startsWith("@@")) {
       allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
@@ -98,7 +97,7 @@ class AdblockBridge {
     }
   }
 
-  suspend fun compileRules(rulesText: String): Int = mutex.withLock {
+  fun compileRules(rulesText: String): Int {
     var compiledCount = 0
     if (isNativeLoaded) {
       try {
@@ -157,7 +156,7 @@ class AdblockBridge {
     return compiledCount
   }
 
-  suspend fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean = mutex.withLock {
+  fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean {
     if (isNativeLoaded) {
       try {
         val blocked = nativeMatches(url, sourceUrl, resourceType)
