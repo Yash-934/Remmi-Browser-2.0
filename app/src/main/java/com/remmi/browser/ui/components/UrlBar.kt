@@ -121,21 +121,9 @@ fun TerminalUrlBar(
   var historySuggestions by remember { mutableStateOf<List<HistoryItem>>(emptyList()) }
   var bookmarkSuggestions by remember { mutableStateOf<List<BookmarkItem>>(emptyList()) }
 
-  var showQuickActions by remember(url) {
-    mutableStateOf(url.isNotBlank() && url != "about:blank" && url != "remmi://newtab")
-  }
-
-  // Auto-hide the Quick Actions menu after 3.5 seconds
-  
   BackHandler(enabled = isEditing) {
     isEditing = false
     editText = url
-  }
-LaunchedEffect(url, showQuickActions) {
-    if (showQuickActions && !isEditing && url.isNotBlank() && url != "about:blank" && url != "remmi://newtab") {
-      delay(3500)
-      showQuickActions = false
-    }
   }
 
   val isInternalPage = url.isEmpty() || url == "about:blank" || url == "remmi://newtab" || url == "about:home"
@@ -762,76 +750,6 @@ LaunchedEffect(url, showQuickActions) {
       }
     }
 
-    // 4. Quick Actions Bar when viewing an active page
-    val extractedOriginal = remember(url) {
-      if (url.isNotBlank() && url != "about:blank" && url != "remmi://newtab") {
-        com.remmi.browser.security.RedirectInspector.extractNestedTargetUrl(url)
-      } else null
-    }
-
-    AnimatedVisibility(
-      visible = showQuickActions && !isEditing && url.isNotBlank() && url != "about:blank" && url != "remmi://newtab",
-      enter = fadeIn() + expandVertically(),
-      exit = fadeOut() + shrinkVertically(),
-    ) {
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(top = 4.dp, start = 2.dp, end = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically
-      ) {
-        QuickActionButton(
-          icon = Icons.Default.ContentCopy,
-          label = "Copy URL",
-          onClick = {
-            showQuickActions = false
-            clipboard.copy(url, "Page URL")
-            Toast.makeText(context, "Exact URL copied", Toast.LENGTH_SHORT).show()
-          },
-          modifier = Modifier.weight(1f)
-        )
-        if (extractedOriginal != null) {
-          QuickActionButton(
-            icon = Icons.Default.Launch,
-            label = "Open Original",
-            onClick = {
-              showQuickActions = false
-              onUrlSubmit(extractedOriginal)
-            },
-            modifier = Modifier.weight(1.1f)
-          )
-        } else {
-          QuickActionButton(
-            icon = Icons.Default.Share,
-            label = "Share",
-            onClick = {
-              showQuickActions = false
-              onShareUrl()
-            },
-            modifier = Modifier.weight(1f)
-          )
-        }
-        QuickActionButton(
-          icon = Icons.Default.Visibility,
-          label = "Inspect Link",
-          onClick = {
-            showQuickActions = false
-            onInspectRedirects()
-          },
-          modifier = Modifier.weight(1f)
-        )
-        QuickActionButton(
-          icon = Icons.Default.Security,
-          label = "Security",
-          onClick = {
-            showQuickActions = false
-            onOpenSecurityPanel()
-          },
-          modifier = Modifier.weight(1f)
-        )
-      }
-    }
   }
 }
 
@@ -891,47 +809,6 @@ private fun SuggestionRow(
         contentDescription = "Fill in address bar",
         tint = ThemeCyber.colors.textSecondary,
         modifier = Modifier.size(15.dp)
-      )
-    }
-  }
-}
-
-@Composable
-private fun QuickActionButton(
-  icon: androidx.compose.ui.graphics.vector.ImageVector,
-  label: String,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  Surface(
-    shape = RoundedCornerShape(8.dp),
-    color = ThemeCyber.colors.surfaceLight.copy(alpha = 0.7f),
-    border = BorderStroke(0.6.dp, ThemeCyber.colors.surfaceBorder),
-    modifier = modifier
-      .height(26.dp)
-      .clickable(onClick = onClick)
-  ) {
-    Row(
-      modifier = Modifier
-        .fillMaxSize()
-        .padding(horizontal = 4.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.Center
-    ) {
-      Icon(
-        imageVector = icon,
-        contentDescription = label,
-        tint = ThemeCyber.colors.textSecondary,
-        modifier = Modifier.size(11.dp)
-      )
-      Spacer(modifier = Modifier.width(3.dp))
-      Text(
-        text = label,
-        fontSize = 9.5.sp,
-        fontFamily = CyberMonoFamily,
-        color = ThemeCyber.colors.textSecondary,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis
       )
     }
   }

@@ -3,8 +3,13 @@ package com.remmi.browser.security
 import android.util.Log
 import com.remmi.browser.util.DebugLogManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -36,9 +41,9 @@ object TorStatusChecker {
 
   // Configurable network timeout constants
   const val SOCKS_CONNECT_TIMEOUT_MS = 1500
-  const val TOR_VERIFY_CONNECT_TIMEOUT_SEC = 4L
-  const val TOR_VERIFY_READ_TIMEOUT_SEC = 5L
-  const val TOR_VERIFY_TOTAL_TIMEOUT_MS = 15_000L
+  const val TOR_VERIFY_CONNECT_TIMEOUT_SEC = 5L
+  const val TOR_VERIFY_READ_TIMEOUT_SEC = 6L
+  const val TOR_VERIFY_TOTAL_TIMEOUT_MS = 25_000L
   const val MAX_VERIFICATION_ATTEMPTS = 2
 
   fun isPortListening(host: String = "127.0.0.1", port: Int? = CurrentTorRoute.currentSocksPort, timeoutMs: Int = SOCKS_CONNECT_TIMEOUT_MS): Boolean {
@@ -84,9 +89,96 @@ object TorStatusChecker {
     }
   }
 
+  private fun executePrimaryCheck(socksPort: Int, startTime: Long, attempt: Int): TorStatusResult? {
+    var call: Call? = null
+    try {
+      val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
+      val client = OkHttpClient.Builder()
+        .proxy(proxy)
+        .connectTimeout(TOR_VERIFY_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .readTimeout(TOR_VERIFY_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
+        .build()
+
+      val request = Request.Builder()
+        .url(TOR_CHECK_API)
+        .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
+        .build()
+
+      call = client.newCall(request)
+      call.execute().use { response ->
+        val elapsed = System.currentTimeMillis() - startTime
+        val body = response.body?.string() ?: ""
+        if (response.isSuccessful && body.isNotBlank()) {
+          val json = JSONObject(body)
+          val isTor = json.optBoolean("IsTor", false)
+          val ip = json.optString("IP", "Unknown")
+          DebugLogManager.log("Tor check result (primary): isTor=$isTor, IP=$ip (${elapsed}ms)")
+          return TorStatusResult(
+            isTor = isTor,
+            ip = ip,
+            message = if (isTor) "Tor Exit Routing Confirmed by TorProject" else "Proxy Connected (Non-Tor or Clearnet Leak)",
+            latencyMs = elapsed,
+            socksHandshakePassed = true,
+            attemptsMade = attempt,
+          )
+        }
+      }
+    } catch (e: Exception) {
+      DebugLogManager.log("Tor verification primary check notice: ${e.message}")
+    } finally {
+      try { call?.cancel() } catch (_: Exception) {}
+    }
+    return null
+  }
+
+  private fun executeFallbackCheck(socksPort: Int, startTime: Long, attempt: Int): TorStatusResult? {
+    var call: Call? = null
+    try {
+      val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
+      val client = OkHttpClient.Builder()
+        .proxy(proxy)
+        .connectTimeout(TOR_VERIFY_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .readTimeout(TOR_VERIFY_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
+        .build()
+
+      val request = Request.Builder()
+        .url("https://api.ipify.org?format=json")
+        .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
+        .build()
+
+      call = client.newCall(request)
+      call.execute().use { response ->
+        val elapsed = System.currentTimeMillis() - startTime
+        val body = response.body?.string() ?: ""
+        if (response.isSuccessful && body.isNotBlank()) {
+          val json = JSONObject(body)
+          val ip = json.optString("ip", "Unknown")
+          if (ip.isNotBlank() && ip != "Unknown") {
+            DebugLogManager.log("Tor SOCKS5 fallback check succeeded: Exit IP=$ip (${elapsed}ms)")
+            return TorStatusResult(
+              isTor = true,
+              ip = ip,
+              message = "Tor SOCKS5 Outbound Route Verified ($ip)",
+              latencyMs = elapsed,
+              socksHandshakePassed = true,
+              attemptsMade = attempt,
+            )
+          }
+        }
+      }
+    } catch (e: Exception) {
+      DebugLogManager.log("Tor verification fallback check notice: ${e.message}")
+    } finally {
+      try { call?.cancel() } catch (_: Exception) {}
+    }
+    return null
+  }
+
   /**
-   * Executes remote verification against check.torproject.org strictly via SOCKS5 proxy
-   * with bounded retries and hard deadline.
+   * Executes remote verification against Tor check API and fallback endpoint concurrently via SOCKS5 proxy
+   * with 25s deadline and race orchestration.
    */
   suspend fun verifyTorRouting(socksPort: Int? = CurrentTorRoute.currentSocksPort, maxAttempts: Int = MAX_VERIFICATION_ATTEMPTS, currentGeneration: Long = CurrentTorRoute.currentGeneration): TorStatusResult =
     withContext(Dispatchers.IO) {
@@ -125,8 +217,7 @@ object TorStatusChecker {
           )
         }
 
-        // Level 3: Verify Remote Tor Project Confirmation through SOCKS5 proxy with bounded retries
-        var lastErrorMessage = ""
+        // Level 3: Verify Remote Tor Project Confirmation through SOCKS5 proxy with concurrent racing
         for (attempt in 1..maxAttempts) {
           if (currentGeneration != CurrentTorRoute.currentGeneration) {
             DebugLogManager.log("Tor verification attempt $attempt cancelled due to stale generation.")
@@ -139,92 +230,57 @@ object TorStatusChecker {
               attemptsMade = attempt,
             )
           }
-          var primaryCall: Call? = null
-          try {
-            DebugLogManager.log("Verifying Tor exit routing via SOCKS 127.0.0.1:$socksPort (attempt $attempt/$maxAttempts)...")
-            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
-            val client = OkHttpClient.Builder()
-              .proxy(proxy)
-              .connectTimeout(TOR_VERIFY_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
-              .readTimeout(TOR_VERIFY_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
-              .retryOnConnectionFailure(false)
-              .build()
 
-            val request = Request.Builder()
-              .url(TOR_CHECK_API)
-              .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
-              .build()
+          DebugLogManager.log("Verifying Tor exit routing via SOCKS 127.0.0.1:$socksPort (attempt $attempt/$maxAttempts)...")
 
-            val call = client.newCall(request)
-            primaryCall = call
-            call.execute().use { response ->
-              val elapsed = System.currentTimeMillis() - startTime
-              val body = response.body?.string() ?: ""
-              if (response.isSuccessful && body.isNotBlank()) {
-                val json = JSONObject(body)
-                val isTor = json.optBoolean("IsTor", false)
-                val ip = json.optString("IP", "Unknown")
-                DebugLogManager.log("Tor check result: isTor=$isTor, IP=$ip (${elapsed}ms)")
-                return@withTimeoutOrNull TorStatusResult(
-                  isTor = isTor,
-                  ip = ip,
-                  message = if (isTor) "Tor Exit Routing Confirmed by TorProject" else "Proxy Connected (Non-Tor or Clearnet Leak)",
-                  latencyMs = elapsed,
-                  socksHandshakePassed = true,
-                  attemptsMade = attempt,
-                )
+          val raceResult = kotlinx.coroutines.coroutineScope {
+            val primaryDeferred = async(Dispatchers.IO) {
+              executePrimaryCheck(socksPort, startTime, attempt)
+            }
+            val fallbackDeferred = async(Dispatchers.IO) {
+              executeFallbackCheck(socksPort, startTime, attempt)
+            }
+
+            val channel = kotlinx.coroutines.channels.Channel<TorStatusResult>(2)
+            launch(Dispatchers.IO) {
+              val res = primaryDeferred.await()
+              if (res != null && res.isTor) {
+                channel.trySend(res)
+              }
+            }
+            launch(Dispatchers.IO) {
+              val res = fallbackDeferred.await()
+              if (res != null && res.isTor) {
+                channel.trySend(res)
+              }
+            }
+
+            val timeoutPerAttempt = 7_000L
+            val winner = kotlinx.coroutines.withTimeoutOrNull(timeoutPerAttempt) {
+              channel.receive()
+            }
+
+            if (winner != null && winner.isTor) {
+              primaryDeferred.cancel()
+              fallbackDeferred.cancel()
+              winner
+            } else {
+              val pRes = try { primaryDeferred.await() } catch (_: Exception) { null }
+              if (pRes != null && pRes.isTor) {
+                fallbackDeferred.cancel()
+                pRes
               } else {
-                lastErrorMessage = "HTTP response ${response.code}"
+                val fbRes = try { fallbackDeferred.await() } catch (_: Exception) { null }
+                if (fbRes != null && fbRes.isTor) {
+                  primaryDeferred.cancel()
+                  fbRes
+                } else null
               }
             }
-          } catch (e: Exception) {
-            lastErrorMessage = e.localizedMessage ?: e.message ?: "Timeout"
-            DebugLogManager.log("Tor verification primary check attempt $attempt failed: $lastErrorMessage")
-            
-            // Level 3b: Fallback IP verification via SOCKS5 proxy if primary check.torproject.org is rate-limited/slow
-            var fallbackCall: Call? = null
-            try {
-              val fallbackProxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
-              val fallbackClient = OkHttpClient.Builder()
-                .proxy(fallbackProxy)
-                .connectTimeout(TOR_VERIFY_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
-                .readTimeout(TOR_VERIFY_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(false)
-                .build()
+          }
 
-              val fallbackReq = Request.Builder()
-                .url("https://api.ipify.org?format=json")
-                .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
-                .build()
-
-              val fbCall = fallbackClient.newCall(fallbackReq)
-              fallbackCall = fbCall
-              fbCall.execute().use { fbResponse ->
-                val fbBody = fbResponse.body?.string() ?: ""
-                if (fbResponse.isSuccessful && fbBody.isNotBlank()) {
-                  val json = JSONObject(fbBody)
-                  val fbIp = json.optString("ip", "Unknown")
-                  if (fbIp.isNotBlank() && fbIp != "Unknown") {
-                    val elapsed = System.currentTimeMillis() - startTime
-                    DebugLogManager.log("Tor SOCKS5 fallback check succeeded: Exit IP=$fbIp (${elapsed}ms)")
-                    return@withTimeoutOrNull TorStatusResult(
-                      isTor = true,
-                      ip = fbIp,
-                      message = "Tor SOCKS5 Outbound Route Verified ($fbIp)",
-                      latencyMs = elapsed,
-                      socksHandshakePassed = true,
-                      attemptsMade = attempt,
-                    )
-                  }
-                }
-              }
-            } catch (fbErr: Exception) {
-              DebugLogManager.log("Tor fallback verification notice: ${fbErr.message}")
-            } finally {
-              try { fallbackCall?.cancel() } catch (_: Exception) {}
-            }
-          } finally {
-            try { primaryCall?.cancel() } catch (_: Exception) {}
+          if (raceResult != null && raceResult.isTor) {
+            return@withTimeoutOrNull raceResult
           }
 
           if (attempt < maxAttempts) {
@@ -236,7 +292,7 @@ object TorStatusChecker {
         TorStatusResult(
           isTor = false,
           ip = "Verification Failed",
-          message = "SOCKS5 active on $socksPort but check.torproject.org check failed after $maxAttempts attempts ($lastErrorMessage)",
+          message = "SOCKS5 active on $socksPort but Tor verification failed after $maxAttempts attempts",
           latencyMs = totalElapsed,
           socksHandshakePassed = true,
           attemptsMade = maxAttempts,

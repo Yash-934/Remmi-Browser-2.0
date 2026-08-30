@@ -135,7 +135,7 @@ class PrivacyNetworkController private constructor(private val context: Context)
       return@withContext Result.failure(err)
     }
 
-    DebugLogManager.log("[ROUTE] GEOCKO_ROUTE_VERIFIED")
+    DebugLogManager.log("[ROUTE] GECKO_ROUTE_VERIFIED")
     // Step 5: Advance route generation and update Single Source of Truth
     CurrentTorRoute.updateRoute(
       socksPort = socksPort,
@@ -150,7 +150,7 @@ class PrivacyNetworkController private constructor(private val context: Context)
     // Ensure all tabs reflect the global APP-WIDE Tor proxy routing
     TabManager.getInstance().setAllTabsProfile(PrivacyProfile.GHOST)
 
-    DebugLogManager.log("[ROUTE] ACTIVE profile=GHOST port=$socksPort exitIp=${torManager.currentCircuit.value?.verifiedExitIp ?: "Active"}")
+    DebugLogManager.log("[ROUTE] GHOST_ROUTE_READY profile=GHOST port=$socksPort exitIp=${torManager.currentCircuit.value?.verifiedExitIp ?: "Active"}")
     Result.success(socksPort)
     }
   }

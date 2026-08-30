@@ -355,9 +355,9 @@ class TorManager(private val context: Context) {
         _bootstrapState.value = TorState.SOCKS5_VERIFY(activePort)
         DebugLogManager.log("Step 4/6: SOCKS5 protocol verified on 127.0.0.1:$activePort")
 
-        // Step 6: Remote Tor Exit Routing Verification via check.torproject.org
+        // Step 6: Remote Tor Exit Routing Verification via check.torproject.org / SOCKS5 race
         _bootstrapState.value = TorState.REMOTE_TOR_VERIFY(activePort, 1)
-        DebugLogManager.log("Step 5/6: Verifying Tor exit routing against check.torproject.org on port $activePort...")
+        DebugLogManager.log("Step 5/6: Verifying Tor exit routing via SOCKS5 proxy on port $activePort...")
         delay(300)
 
         val verifyResult = TorStatusChecker.verifyTorRouting(activePort, maxAttempts = 3)
@@ -387,7 +387,7 @@ class TorManager(private val context: Context) {
         consecutiveStartFailures = 0 // Reset failures on successful READY
 
         RemmiTorService.updateStatus(context, "Ghost Mode Active • Encrypted Tor Routing (127.0.0.1:$activePort)")
-        DebugLogManager.log("Step 6/6: Tor routing READY on port $activePort (Exit IP: ${verifyResult.ip})")
+        DebugLogManager.log("Step 6/6: TOR_EXIT_VERIFIED on port $activePort (Exit IP: ${verifyResult.ip}) • Ready for Gecko proxy application")
 
         Result.success(activePort)
       } catch (t: Throwable) {

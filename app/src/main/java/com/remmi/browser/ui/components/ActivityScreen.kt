@@ -1743,106 +1743,56 @@ fun BookmarkCardItem(
     }
 }
 
-// --- Brand Favicon Badge (High-res favicon with smart fallback) ---
+// --- Brand Favicon Badge (High-res vector brand logo with smart fallback) ---
 @Composable
 fun BrandFaviconBadge(
     url: String,
     domain: String,
     isInternal: Boolean
 ) {
-    val context = LocalContext.current
-    val lowerDomain = domain.lowercase()
-    val lowerUrl = url.lowercase()
-
-    val isTorSite = lowerDomain.contains("torproject.org") || lowerUrl.contains("torproject.org")
-
-    val (bgColor, textColor, labelOrIcon) = when {
-        isInternal || lowerUrl.startsWith("about:") -> Triple(Color(0xFF2563EB), Color.White, "🌐")
-        lowerDomain.contains("eff.org") -> Triple(Color(0xFFDC2626), Color.White, "E")
-        lowerDomain.contains("wikipedia") -> Triple(Color(0xFFF1F5F9), Color(0xFF0F172A), "W")
-        lowerDomain.contains("proton") -> Triple(Color(0xFF7C3AED), Color.White, "P")
-        lowerDomain.contains("github") -> Triple(Color(0xFF18181B), Color.White, "G")
-        lowerDomain.contains("youtube") -> Triple(Color(0xFFEF4444), Color.White, "▶")
-        lowerDomain.contains("reddit") -> Triple(Color(0xFFFF4500), Color.White, "R")
-        lowerDomain.contains("duckduckgo") -> Triple(Color(0xFFDE5833), Color.White, "D")
-        lowerDomain.contains("google") -> Triple(Color(0xFF4285F4), Color.White, "G")
-        lowerDomain.contains("mozilla") -> Triple(Color(0xFF000000), Color.White, "M")
-        lowerDomain.contains("android") -> Triple(Color(0xFF3DDC84), Color.Black, "A")
-        else -> {
-            val initial = domain.firstOrNull()?.uppercaseChar()?.toString() ?: "W"
-            val hash = domain.hashCode()
-            val colors = listOf(
-                Color(0xFF0284C7), Color(0xFF7C3AED), Color(0xFF059669),
-                Color(0xFFD97706), Color(0xFFDB2777), Color(0xFF4F46E5)
+    val brand = remember(url, domain, isInternal) {
+        if (isInternal || url.startsWith("about:") || url.startsWith("remmi:")) {
+            BrandInfo(
+                iconRes = R.drawable.ic_remmi_panda,
+                isVectorLogo = true,
+                bgColor = Color(0xFF0284C7),
+                textColor = Color.White,
+                letterFallback = "🐼",
+                brandName = "Remmi"
             )
-            val selectedBg = colors[Math.abs(hash) % colors.size]
-            Triple(selectedBg, Color.White, initial)
+        } else {
+            BrandLogoRegistry.resolveBrand(url = url, domain = domain)
         }
     }
 
-    val faviconUrl = remember(url) { getFaviconUrl(url) }
-
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = bgColor.copy(alpha = 0.18f),
-        border = BorderStroke(1.dp, bgColor.copy(alpha = 0.35f)),
+        color = brand.bgColor.copy(alpha = 0.18f),
+        border = BorderStroke(1.dp, brand.bgColor.copy(alpha = 0.35f)),
         modifier = Modifier.size(38.dp)
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            if (isTorSite) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_tor),
-                    contentDescription = null,
-                    tint = ThemeCyber.colors.torPurple,
-                    modifier = Modifier.size(22.dp)
-                )
-            } else if (isInternal || lowerUrl.startsWith("about:")) {
-                Text(
-                    text = "🌐",
-                    fontSize = 18.sp
-                )
-            } else if (faviconUrl.isNotEmpty()) {
-                SubcomposeAsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(faviconUrl)
-                        .crossfade(true)
-                        .diskCachePolicy(CachePolicy.ENABLED)
-                        .memoryCachePolicy(CachePolicy.ENABLED)
-                        .build(),
-                    contentDescription = domain,
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clip(RoundedCornerShape(4.dp)),
-                    contentScale = ContentScale.Fit,
-                    loading = {
-                        Text(
-                            text = labelOrIcon,
-                            color = bgColor,
-                            fontSize = if (labelOrIcon == "▶") 14.sp else 16.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                    },
-                    error = {
-                        Text(
-                            text = labelOrIcon,
-                            color = bgColor,
-                            fontSize = if (labelOrIcon == "▶") 14.sp else 16.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                    },
-                    success = {
-                        SubcomposeAsyncImageContent(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                        )
-                    }
-                )
+            if (brand.iconRes != null) {
+                if (brand.iconTint != null) {
+                    Icon(
+                        painter = painterResource(brand.iconRes),
+                        contentDescription = brand.brandName,
+                        tint = brand.iconTint,
+                        modifier = Modifier.size(22.dp)
+                    )
+                } else {
+                    Icon(
+                        painter = painterResource(brand.iconRes),
+                        contentDescription = brand.brandName,
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             } else {
                 Text(
-                    text = labelOrIcon,
-                    color = bgColor,
-                    fontSize = if (labelOrIcon == "🌐" || labelOrIcon == "▶") 14.sp else 16.sp,
+                    text = brand.letterFallback,
+                    color = brand.bgColor,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Black
                 )
             }

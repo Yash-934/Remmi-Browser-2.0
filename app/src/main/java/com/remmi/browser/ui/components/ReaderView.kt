@@ -266,80 +266,86 @@ fun ReaderView(
         shadowElevation = 3.dp,
         border = BorderStroke(0.5.dp, readerTheme.accentColor.copy(alpha = 0.2f))
       ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+          modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+        ) {
           Row(
             modifier = Modifier
               .fillMaxWidth()
-              .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+              .heightIn(min = 48.dp)
+              .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
           ) {
             // Left: Back button & Title Badge
-            Row(
-              modifier = Modifier.weight(1f),
-              verticalAlignment = Alignment.CenterVertically
+            IconButton(
+              onClick = {
+                speechManager.stop()
+                onClose()
+              },
+              modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(readerTheme.background)
+                .border(0.6.dp, readerTheme.accentColor.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                .testTag("reader_exit_button")
             ) {
-              IconButton(
-                onClick = {
-                  speechManager.stop()
-                  onClose()
-                },
-                modifier = Modifier
-                  .size(38.dp)
-                  .clip(RoundedCornerShape(8.dp))
-                  .background(readerTheme.background)
-                  .border(0.6.dp, readerTheme.accentColor.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                  .testTag("reader_exit_button")
-              ) {
-                Icon(
-                  imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                  contentDescription = "Exit Reader Mode",
-                  tint = readerTheme.accentColor,
-                  modifier = Modifier.size(20.dp),
-                )
-              }
-
-              Spacer(modifier = Modifier.width(10.dp))
-
-              Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                  Icon(
-                    imageVector = Icons.Default.MenuBook,
-                    contentDescription = null,
-                    tint = readerTheme.accentColor,
-                    modifier = Modifier.size(13.dp),
-                  )
-                  Spacer(modifier = Modifier.width(5.dp))
-                  Text(
-                    text = "READER MODE",
-                    fontFamily = ThemeCyber.fontFamily,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = readerTheme.accentColor,
-                  )
-                }
-
-                val siteName = displayArticle?.siteName?.ifBlank { null }
-                  ?: displayArticle?.sourceUrl?.let { url ->
-                    try {
-                      java.net.URI(url).host?.replace("www.", "")
-                    } catch (e: Exception) {
-                      null
-                    }
-                  } ?: "Clean View"
-
-                Text(
-                  text = "$siteName • ~${displayArticle?.readingTimeMinutes ?: 1} min read",
-                  fontFamily = fontChoice.fontFamily,
-                  fontSize = 10.sp,
-                  color = readerTheme.textColor.copy(alpha = 0.65f),
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis
-                )
-              }
+              Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Exit Reader Mode",
+                tint = readerTheme.accentColor,
+                modifier = Modifier.size(18.dp),
+              )
             }
 
-            // Right Quick Actions (Save, Share & Quick Exit)
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Column(
+              modifier = Modifier.weight(1f)
+            ) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+              ) {
+                Icon(
+                  imageVector = Icons.Default.MenuBook,
+                  contentDescription = null,
+                  tint = readerTheme.accentColor,
+                  modifier = Modifier.size(13.dp),
+                )
+                Text(
+                  text = "READER MODE",
+                  fontFamily = ThemeCyber.fontFamily,
+                  fontSize = 11.sp,
+                  fontWeight = FontWeight.Bold,
+                  color = readerTheme.accentColor,
+                  maxLines = 1,
+                )
+              }
+
+              val siteName = displayArticle?.siteName?.ifBlank { null }
+                ?: displayArticle?.sourceUrl?.let { url ->
+                  try {
+                    java.net.URI(url).host?.replace("www.", "")
+                  } catch (e: Exception) {
+                    null
+                  }
+                } ?: "Clean View"
+
+              Text(
+                text = "$siteName • ~${displayArticle?.readingTimeMinutes ?: 1} min read",
+                fontFamily = fontChoice.fontFamily,
+                fontSize = 10.sp,
+                color = readerTheme.textColor.copy(alpha = 0.7f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+              )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Right Quick Actions (Save & Share)
             Row(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -355,7 +361,7 @@ fun ReaderView(
                   .background(if (isArticleSaved) Color(0xFFF59E0B).copy(alpha = 0.2f) else readerTheme.background)
                   .border(
                     0.6.dp,
-                    if (isArticleSaved) Color(0xFFF59E0B) else readerTheme.accentColor.copy(alpha = 0.25f),
+                    if (isArticleSaved) Color(0xFFF59E0B) else readerTheme.accentColor.copy(alpha = 0.3f),
                     RoundedCornerShape(8.dp)
                   )
                   .testTag("reader_save_reading_list_btn")
@@ -378,31 +384,13 @@ fun ReaderView(
                   .size(36.dp)
                   .clip(RoundedCornerShape(8.dp))
                   .background(readerTheme.background)
-                  .border(0.6.dp, readerTheme.accentColor.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                  .border(0.6.dp, readerTheme.accentColor.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                  .testTag("reader_share_btn")
               ) {
                 Icon(
                   imageVector = Icons.Default.Share,
                   contentDescription = "Share Article",
                   tint = readerTheme.accentColor,
-                  modifier = Modifier.size(17.dp)
-                )
-              }
-
-              IconButton(
-                onClick = {
-                  speechManager.stop()
-                  onClose()
-                },
-                modifier = Modifier
-                  .size(36.dp)
-                  .clip(RoundedCornerShape(8.dp))
-                  .background(readerTheme.background)
-                  .border(0.6.dp, readerTheme.accentColor.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-              ) {
-                Icon(
-                  imageVector = Icons.Default.Close,
-                  contentDescription = "Close Reader",
-                  tint = readerTheme.textColor.copy(alpha = 0.8f),
                   modifier = Modifier.size(17.dp)
                 )
               }
@@ -1215,7 +1203,9 @@ fun ReaderView(
       // (Style, Translate, Highlight, Listen, Export)
       // ==========================================
       Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+          .fillMaxWidth()
+          .navigationBarsPadding(),
         color = readerTheme.surfaceColor,
         shadowElevation = 10.dp,
         border = BorderStroke(0.6.dp, readerTheme.accentColor.copy(alpha = 0.25f))

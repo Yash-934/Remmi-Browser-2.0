@@ -48,6 +48,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -153,6 +157,30 @@ fun NewTabPage(
   var dismissedCopiedUrl by remember { mutableStateOf<String?>(null) }
   var historySuggestions by remember { mutableStateOf<List<HistoryItem>>(emptyList()) }
   var bookmarkSuggestions by remember { mutableStateOf<List<BookmarkItem>>(emptyList()) }
+
+  var isDefaultBrowser by remember {
+    mutableStateOf(DefaultBrowserHelper.isDefaultBrowser(context))
+  }
+  var isDefaultPromptDismissed by rememberSaveable { mutableStateOf(false) }
+
+  val defaultBrowserLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.StartActivityForResult()
+  ) {
+    isDefaultBrowser = DefaultBrowserHelper.isDefaultBrowser(context)
+  }
+
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) {
+        isDefaultBrowser = DefaultBrowserHelper.isDefaultBrowser(context)
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+    }
+  }
 
   // Check clipboard on resume
   LaunchedEffect(Unit) {
@@ -433,6 +461,139 @@ fun NewTabPage(
           accentColor = ThemeCyber.colors.primary,
           modifier = Modifier.padding(start = 8.dp)
         )
+      }
+
+      // ==========================================
+      // DEFAULT BROWSER PROMPT CARD (Home Screen)
+      // ==========================================
+      if (!isDefaultBrowser && !isDefaultPromptDismissed) {
+        Surface(
+          shape = RoundedCornerShape(16.dp),
+          color = if (isLight) Color(0xFFEFF6FF) else Color(0xFF0F1E36),
+          border = BorderStroke(
+            1.2.dp,
+            if (isLight) Color(0xFF93C5FD) else Color(0xFF38BDF8).copy(alpha = 0.6f)
+          ),
+          shadowElevation = if (isLight) 3.dp else 0.dp,
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 10.dp)
+            .testTag("home_set_default_browser_card")
+        ) {
+          Column(
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+          ) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.Top
+            ) {
+              Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+              ) {
+                Box(
+                  modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isLight) Color(0xFFDBEAFE) else Color(0xFF1E3A8A).copy(alpha = 0.5f))
+                    .border(0.8.dp, if (isLight) Color(0xFF60A5FA) else Color(0xFF38BDF8), RoundedCornerShape(10.dp)),
+                  contentAlignment = Alignment.Center
+                ) {
+                  Icon(
+                    imageVector = Icons.Default.Language,
+                    contentDescription = null,
+                    tint = if (isLight) Color(0xFF1D4ED8) else Color(0xFF38BDF8),
+                    modifier = Modifier.size(22.dp)
+                  )
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                    Text(
+                      text = "Set as Default Browser",
+                      color = if (isLight) Color(0xFF1E3A8A) else Color(0xFFF1F5F9),
+                      fontSize = 13.5.sp,
+                      fontWeight = FontWeight.Bold
+                    )
+                    Surface(
+                      shape = RoundedCornerShape(4.dp),
+                      color = if (isLight) Color(0xFFDCFCE7) else Color(0xFF064E3B)
+                    ) {
+                      Text(
+                        text = "PROTECT ALL LINKS",
+                        color = if (isLight) Color(0xFF15803D) else Color(0xFF34D399),
+                        fontSize = 8.5.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = CyberMonoFamily,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                      )
+                    }
+                  }
+                  Spacer(modifier = Modifier.height(2.dp))
+                  Text(
+                    text = "Open web links automatically with Tor onion routing & ad-blocking privacy.",
+                    color = if (isLight) Color(0xFF475569) else Color(0xFF94A3B8),
+                    fontSize = 11.5.sp,
+                    lineHeight = 15.sp
+                  )
+                }
+              }
+
+              IconButton(
+                onClick = { isDefaultPromptDismissed = true },
+                modifier = Modifier.size(26.dp)
+              ) {
+                Icon(
+                  imageVector = Icons.Default.Close,
+                  contentDescription = "Dismiss",
+                  tint = if (isLight) Color(0xFF94A3B8) else Color(0xFF64748B),
+                  modifier = Modifier.size(16.dp)
+                )
+              }
+            }
+
+            // Make Default Button
+            Button(
+              onClick = {
+                val activity = context as? Activity
+                if (activity != null) {
+                  DefaultBrowserHelper.requestSetDefaultBrowser(activity, defaultBrowserLauncher)
+                }
+              },
+              shape = RoundedCornerShape(10.dp),
+              colors = ButtonDefaults.buttonColors(
+                containerColor = if (isLight) Color(0xFF2563EB) else Color(0xFF00E5FF),
+                contentColor = if (isLight) Color.White else Color(0xFF070B13)
+              ),
+              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("home_set_default_browser_btn")
+            ) {
+              Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp)
+              )
+              Spacer(modifier = Modifier.width(6.dp))
+              Text(
+                text = "SET AS DEFAULT BROWSER",
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                fontFamily = ThemeCyber.fontFamily,
+                letterSpacing = 0.5.sp
+              )
+            }
+          }
+        }
       }
 
       // ==========================================
@@ -1287,83 +1448,12 @@ private fun FavoriteTile(
           modifier = Modifier.fillMaxSize(),
           contentAlignment = Alignment.Center
         ) {
-          if (isTorSite) {
-            Icon(
-              painter = painterResource(R.drawable.ic_tor),
-              contentDescription = item.title,
-              tint = ThemeCyber.colors.torPurple,
-              modifier = Modifier.size(28.dp)
-            )
-          } else if (faviconUrl.isNotEmpty()) {
-            SubcomposeAsyncImage(
-              model = ImageRequest.Builder(context)
-                .data(faviconUrl)
-                .crossfade(true)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .build(),
-              contentDescription = item.title,
-              modifier = Modifier
-                .size(30.dp)
-                .clip(RoundedCornerShape(6.dp)),
-              contentScale = ContentScale.Fit,
-              loading = {
-                Box(
-                  modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(tileAccentColor.copy(alpha = 0.18f)),
-                  contentAlignment = Alignment.Center
-                ) {
-                  Text(
-                    text = initialLetter,
-                    color = tileAccentColor,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
-                  )
-                }
-              },
-              error = {
-                Box(
-                  modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(tileAccentColor.copy(alpha = 0.18f)),
-                  contentAlignment = Alignment.Center
-                ) {
-                  Text(
-                    text = initialLetter,
-                    color = tileAccentColor,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
-                  )
-                }
-              },
-              success = {
-                SubcomposeAsyncImageContent(
-                  modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                )
-              }
-            )
-          } else {
-            // Letter Placeholder
-            Box(
-              modifier = Modifier
-                .size(30.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(tileAccentColor.copy(alpha = 0.18f)),
-              contentAlignment = Alignment.Center
-            ) {
-              Text(
-                text = initialLetter,
-                color = tileAccentColor,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp
-              )
-            }
-          }
+          BrandFaviconIcon(
+            url = item.url,
+            iconKey = item.iconKey,
+            title = item.title,
+            size = 30.dp
+          )
         }
       }
 
