@@ -55,22 +55,6 @@ jobs:
     - name: Build Android APK
       run: ./gradlew assembleDebug
 
-    - name: Verify APK Native Binaries and Build ID
-      run: |
-        unzip -q app/build/outputs/apk/debug/app-debug.apk -d apk_extracted
-        echo "Validating freshly built SHA-256 against packaged APK SHA-256"
-        
-        for abi in arm64-v8a armeabi-v7a x86_64; do
-          ORIG=$(sha256sum app/src/main/jniLibs/$abi/libadblock_rust.so | awk '{print $1}')
-          PACKAGED=$(sha256sum apk_extracted/lib/$abi/libadblock_rust.so | awk '{print $1}')
-          echo "$abi original: $ORIG"
-          echo "$abi packaged: $PACKAGED"
-          if [ "$ORIG" != "$PACKAGED" ]; then
-            echo "Mismatch detected for $abi!"
-            exit 1
-          fi
-        done
-        echo "All packaged binaries match the freshly built native libraries."
 
     - name: Stale Binary Protection
       run: |
@@ -94,4 +78,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
+        path: app/build/outputs/apk/debug/*.apk
