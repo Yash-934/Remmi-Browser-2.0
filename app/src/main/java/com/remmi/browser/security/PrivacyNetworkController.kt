@@ -63,6 +63,14 @@ class PrivacyNetworkController private constructor(private val context: Context)
     NetworkHardening.resetAppliedState()
 
     try {
+      geckoEngine.runtime?.let { runtime ->
+        NetworkHardening.applyShieldNetworkSettings(runtime, generation)
+      }
+    } catch (t: Throwable) {
+      Log.w(TAG, "Gecko rollback to Shield failed after Ghost failure", t)
+    }
+
+    try {
       torManager.stopTor()
     } catch (t: Throwable) {
       Log.w(TAG, "Tor cleanup failed after Ghost failure", t)
@@ -218,12 +226,9 @@ class PrivacyNetworkController private constructor(private val context: Context)
       }
 
       // Step 6: Advance route generation and update Single Source of Truth
-      val committed = CurrentTorRoute.updateRoute(
+      val committed = CurrentTorRoute.commitReadyRoute(
         socksPort = socksPort,
-        isGhostActive = true,
-        isVerified = true,
         exitIp = torManager.currentCircuit.value?.verifiedExitIp,
-        failoverDirect = false,
         generation = generation
       )
 
@@ -231,8 +236,6 @@ class PrivacyNetworkController private constructor(private val context: Context)
         val err = IllegalStateException("Stale Ghost route transition (generation mismatch)")
         return@withContext failGhostTransition(generation, err, stage = "STALE_COMMIT")
       }
-
-      CurrentTorRoute.setPhase(GhostRoutePhase.READY, generation)
 
       // Ensure all tabs reflect the global APP-WIDE Tor proxy routing
       TabManager.getInstance().setAllTabsProfile(PrivacyProfile.GHOST)
@@ -319,12 +322,9 @@ class PrivacyNetworkController private constructor(private val context: Context)
         return@withContext Result.failure(err)
       }
 
-      val committed = CurrentTorRoute.updateRoute(
+      val committed = CurrentTorRoute.commitReadyRoute(
         socksPort = c.socksPort,
-        isGhostActive = true,
-        isVerified = true,
         exitIp = c.verifiedExitIp,
-        failoverDirect = false,
         generation = generation
       )
 
@@ -334,7 +334,6 @@ class PrivacyNetworkController private constructor(private val context: Context)
         return@withContext Result.failure(err)
       }
 
-      CurrentTorRoute.setPhase(GhostRoutePhase.READY, generation)
       DebugLogManager.log("[ROUTE] GHOST_ROUTE_READY profile=GHOST port=${c.socksPort} exitIp=${c.verifiedExitIp ?: "Active"} generation=$generation")
 
       Result.success(c)

@@ -250,9 +250,9 @@ object NetworkHardening {
     }
 
     if (phaseAFailures.isNotEmpty()) {
-      lastAppliedRouteKey = null
-      Log.e(TAG, "[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures")
-      DebugLogManager.log("[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures")
+      rollbackGhostRouting(runtime, generation)
+      Log.e(TAG, "[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures (rolled back to Shield)")
+      DebugLogManager.log("[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures (rolled back to Shield)")
       return false
     }
 
@@ -262,10 +262,10 @@ object NetworkHardening {
     val phaseAVerifyKeys = routingPrefs.map { it.first }
     val readBackResult = prefController.getPreferences(phaseAVerifyKeys)
     if (readBackResult.isFailure) {
-      lastAppliedRouteKey = null
+      rollbackGhostRouting(runtime, generation)
       val err = readBackResult.exceptionOrNull()?.message ?: "readback_fetch_failed"
-      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_ERROR error=$err")
-      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_ERROR error=$err")
+      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_ERROR error=$err (rolled back to Shield)")
+      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_ERROR error=$err (rolled back to Shield)")
       return false
     }
 
@@ -274,9 +274,9 @@ object NetworkHardening {
 
     val readBackFailures = validateMandatoryRoutingReadback(readBack, port)
     if (readBackFailures.isNotEmpty()) {
-      lastAppliedRouteKey = null
-      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures")
-      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures")
+      rollbackGhostRouting(runtime, generation)
+      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures (rolled back to Shield)")
+      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures (rolled back to Shield)")
       return false
     }
 
@@ -322,6 +322,17 @@ object NetworkHardening {
       DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=SHIELD")
     }
     return applied
+  }
+
+  suspend fun rollbackGhostRouting(
+    runtime: GeckoRuntime?,
+    generation: Long = CurrentTorRoute.currentGeneration
+  ) {
+    lastAppliedRouteKey = null
+    if (runtime != null) {
+      applyShieldNetworkSettings(runtime, generation)
+    }
+    CurrentTorRoute.clearRoute(generation)
   }
 
   fun resetAppliedState() {

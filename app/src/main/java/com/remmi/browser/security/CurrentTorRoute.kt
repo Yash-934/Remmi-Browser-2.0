@@ -3,6 +3,7 @@ package com.remmi.browser.security
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.util.concurrent.atomic.AtomicLong
 
 enum class GhostRoutePhase {
@@ -75,28 +76,31 @@ object CurrentTorRoute {
 
   fun markStartingGhost(): Long {
     val generation = generationSequence.incrementAndGet()
-    _route.value = TorRouteInfo(
-      host = "127.0.0.1",
-      socksPort = null,
-      isGhostActive = true,
-      isVerified = false,
-      exitIp = null,
-      failoverDirect = false,
-      generation = generation,
-      phase = GhostRoutePhase.STARTING_TOR,
-    )
+    _route.update {
+      TorRouteInfo(
+        host = "127.0.0.1",
+        socksPort = null,
+        isGhostActive = true,
+        isVerified = false,
+        exitIp = null,
+        failoverDirect = false,
+        generation = generation,
+        phase = GhostRoutePhase.STARTING_TOR,
+      )
+    }
     return generation
   }
 
   fun markRotatingGhost(): Long {
-    val current = _route.value
     val generation = generationSequence.incrementAndGet()
-    _route.value = current.copy(
-      isGhostActive = true,
-      isVerified = false,
-      phase = GhostRoutePhase.ROTATING,
-      generation = generation
-    )
+    _route.update { current ->
+      current.copy(
+        isGhostActive = true,
+        isVerified = false,
+        phase = GhostRoutePhase.ROTATING,
+        generation = generation
+      )
+    }
     return generation
   }
 
@@ -104,14 +108,15 @@ object CurrentTorRoute {
     phase: GhostRoutePhase,
     generation: Long
   ): Boolean {
-    val current = _route.value
-    if (generation != current.generation) {
-      return false
+    var accepted = false
+    _route.update { current ->
+      if (generation != current.generation) {
+        return@update current
+      }
+      accepted = true
+      current.copy(phase = phase)
     }
-    _route.value = current.copy(
-      phase = phase
-    )
-    return true
+    return accepted
   }
 
   fun updateRoute(
@@ -122,43 +127,72 @@ object CurrentTorRoute {
     failoverDirect: Boolean = false,
     generation: Long
   ): Boolean {
-    val current = _route.value
-
-    // Never allow a stale transition to overwrite a newer route.
-    if (generation < current.generation) {
-      return false
+    var accepted = false
+    _route.update { current ->
+      // Never allow a stale transition to overwrite a newer route.
+      if (generation < current.generation) {
+        return@update current
+      }
+      accepted = true
+      current.copy(
+        host = "127.0.0.1",
+        socksPort = socksPort,
+        isGhostActive = isGhostActive,
+        isVerified = isVerified,
+        exitIp = exitIp,
+        failoverDirect = failoverDirect,
+        generation = generation,
+        phase = current.phase // Preserves phase; READY must be explicitly set via setPhase or commitReadyRoute
+      )
     }
+    return accepted
+  }
 
-    _route.value = TorRouteInfo(
-      host = "127.0.0.1",
-      socksPort = socksPort,
-      isGhostActive = isGhostActive,
-      isVerified = isVerified,
-      exitIp = exitIp,
-      failoverDirect = failoverDirect,
-      generation = generation,
-      phase = if (isGhostActive && isVerified) GhostRoutePhase.READY else current.phase
-    )
-    return true
+  fun commitReadyRoute(
+    socksPort: Int,
+    exitIp: String?,
+    generation: Long
+  ): Boolean {
+    var accepted = false
+    _route.update { current ->
+      if (generation != current.generation || !current.isGhostActive) {
+        return@update current
+      }
+      accepted = true
+      current.copy(
+        host = "127.0.0.1",
+        socksPort = socksPort,
+        isGhostActive = true,
+        isVerified = true,
+        exitIp = exitIp,
+        failoverDirect = false,
+        generation = generation,
+        phase = GhostRoutePhase.READY
+      )
+    }
+    return accepted
   }
 
   fun clearRoute(generation: Long? = null): Long {
     val targetGen = generation ?: generationSequence.incrementAndGet()
-    val current = _route.value
-    if (targetGen < current.generation) {
-      return current.generation
+    var resultGen = targetGen
+    _route.update { current ->
+      if (targetGen < current.generation) {
+        resultGen = current.generation
+        return@update current
+      }
+      TorRouteInfo(
+        host = "127.0.0.1",
+        socksPort = null,
+        isGhostActive = false,
+        isVerified = false,
+        exitIp = null,
+        failoverDirect = true,
+        generation = targetGen,
+        phase = GhostRoutePhase.SHIELD,
+      )
     }
-    _route.value = TorRouteInfo(
-      host = "127.0.0.1",
-      socksPort = null,
-      isGhostActive = false,
-      isVerified = false,
-      exitIp = null,
-      failoverDirect = true,
-      generation = targetGen,
-      phase = GhostRoutePhase.SHIELD,
-    )
-    return targetGen
+    return resultGen
   }
 
   fun markShieldActive(generation: Long? = null): Long {

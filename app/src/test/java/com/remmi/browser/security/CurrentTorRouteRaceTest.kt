@@ -12,10 +12,9 @@ class CurrentTorRouteRaceTest {
   fun testRaceConditions() {
     // TEST 1: Tor succeeds
     val gen1 = CurrentTorRoute.markStartingGhost()
-    val updated1 = CurrentTorRoute.updateRoute(
+    val updated1 = CurrentTorRoute.commitReadyRoute(
       socksPort = 9050,
-      isGhostActive = true,
-      isVerified = true,
+      exitIp = "1.2.3.4",
       generation = gen1
     )
     assertTrue(updated1)
@@ -25,12 +24,11 @@ class CurrentTorRouteRaceTest {
     // TEST 2: Newer generation starts
     val gen2 = CurrentTorRoute.markStartingGhost()
     assertEquals(GhostRoutePhase.STARTING_TOR, CurrentTorRoute.currentPhase)
-    assertFalse(CurrentTorRoute.isReady) // Not ready until verified
+    assertFalse(CurrentTorRoute.isReady) // Not ready until verified & committed
 
-    val updated2 = CurrentTorRoute.updateRoute(
+    val updated2 = CurrentTorRoute.commitReadyRoute(
       socksPort = 9150,
-      isGhostActive = true,
-      isVerified = true,
+      exitIp = "1.2.3.4",
       generation = gen2
     )
     assertTrue(updated2)
@@ -38,10 +36,9 @@ class CurrentTorRouteRaceTest {
     assertTrue(CurrentTorRoute.isReady)
 
     // TEST 3: Stale generation update rejected
-    val staleUpdate = CurrentTorRoute.updateRoute(
+    val staleUpdate = CurrentTorRoute.commitReadyRoute(
       socksPort = 9050,
-      isGhostActive = false,
-      isVerified = false,
+      exitIp = "1.2.3.4",
       generation = gen1
     )
     assertFalse(staleUpdate) // Stale generation cannot overwrite
