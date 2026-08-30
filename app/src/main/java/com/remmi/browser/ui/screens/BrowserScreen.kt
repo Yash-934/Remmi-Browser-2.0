@@ -2165,32 +2165,17 @@ fun BrowserScreen(
           Button(
             onClick = {
               showDevMenuDialog = false
-              android.widget.Toast.makeText(context, "Launching Inspect Element (Eruda)...", android.widget.Toast.LENGTH_SHORT).show()
+              android.widget.Toast.makeText(context, "Opening DOM Inspector...", android.widget.Toast.LENGTH_SHORT).show()
               val inspectScript = "javascript:(function(){" +
-                "if(window.eruda){" +
-                "  try{window.eruda.show();window.eruda.show('elements');}catch(e){}" +
-                "}else{" +
-                "  var s=document.createElement('script');" +
-                "  s.src='https://cdn.jsdelivr.net/npm/eruda';" +
-                "  document.head.appendChild(s);" +
-                "  s.onload=function(){" +
-                "    try{" +
-                "      eruda.init({tool:['elements','console','network','resources','sources','info']});" +
-                "      eruda.show();" +
-                "      eruda.show('elements');" +
-                "    }catch(e){}" +
-                "  };" +
-                "  s.onerror=function(){" +
-                "    var d=document.createElement('div');" +
-                "    d.id='__inspector_fallback__';" +
-                "    d.style='position:fixed;bottom:0;left:0;right:0;height:45%;background:#0a0e17;color:#00ffcc;font-family:monospace;font-size:11px;z-index:2147483647;border-top:2px solid #00ffcc;overflow:auto;padding:12px;box-shadow:0 -4px 20px rgba(0,0,0,0.8);';" +
-                "    var h='<div style=\"display:flex;justify-content:space-between;border-bottom:1px solid #00ffcc44;padding-bottom:6px;margin-bottom:8px;\"><b style=\"color:#00ffcc;\">&lt;/&gt; DOM INSPECTOR & CONSOLE</b><span onclick=\"this.parentElement.parentElement.remove()\" style=\"cursor:pointer;color:#ff0055;font-weight:bold;padding:2px 8px;border:1px solid #ff0055;border-radius:4px;\">CLOSE [X]</span></div>';" +
-                "    h+='<div style=\"color:#888;margin-bottom:6px;\">PAGE TITLE: ' + (document.title || 'Untitled') + ' | URL: ' + location.href + '</div>';" +
-                "    h+='<pre style=\"white-space:pre-wrap;color:#e6edf3;max-height:300px;overflow:auto;background:#0d1117;padding:8px;border:1px solid #30363d;\">' + document.documentElement.outerHTML.replace(/[&<>\"]/g,function(t){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[t]||t;}) + '</pre>';" +
-                "    d.innerHTML=h;" +
-                "    document.body.appendChild(d);" +
-                "  };" +
-                "}" +
+                "var existing=document.getElementById('__remmi_dom_inspector__');" +
+                "if(existing){existing.remove();return;}" +
+                "var d=document.createElement('div');" +
+                "d.id='__remmi_dom_inspector__';" +
+                "d.style='position:fixed;bottom:0;left:0;right:0;height:50%;background:#0a0e17;color:#00ffcc;font-family:monospace;font-size:12px;z-index:2147483647;border-top:2px solid #00ffcc;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 -4px 20px rgba(0,0,0,0.85);';" +
+                "var header='<div style=\"display:flex;justify-content:space-between;align-items:center;background:#131b26;padding:8px 12px;border-bottom:1px solid #1e293b;\"><b style=\"color:#00ffcc;font-size:12px;\">&lt;/&gt; REMMI DEVELOPER CONSOLE &amp; DOM</b><span onclick=\"document.getElementById(\\'__remmi_dom_inspector__\\').remove()\" style=\"cursor:pointer;color:#ff5555;font-weight:bold;padding:2px 8px;border:1px solid #ff5555;border-radius:4px;\">CLOSE [X]</span></div>';" +
+                "var body='<div style=\"flex:1;overflow:auto;padding:10px;background:#06090e;\"><div style=\"color:#64748b;margin-bottom:6px;\">PAGE: ' + (document.title || 'Untitled') + ' | URL: ' + location.href + '</div><pre style=\"white-space:pre-wrap;color:#38bdf8;margin:0;font-size:11px;user-select:text;\">' + document.documentElement.outerHTML.replace(/[&<>\"]/g,function(t){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[t]||t;}) + '</pre></div>';" +
+                "d.innerHTML=header+body;" +
+                "document.body.appendChild(d);" +
                 "})();"
               geckoEngine.executeScript(activeTab.id, inspectScript)
             },

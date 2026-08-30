@@ -128,7 +128,7 @@ object ReaderExtractor {
   /**
    * Fetches the web page asynchronously and extracts full clean article content
    */
-  suspend fun extractFromUrl(context: Context, url: String, currentTitle: String = "", isGhost: Boolean = false): ReaderArticle = withContext(Dispatchers.IO) {
+  suspend fun extractFromUrl(context: Context, url: String, currentTitle: String = "", isGhost: Boolean = false): ReaderArticle? = withContext(Dispatchers.IO) {
     val domain = try {
       URI(url).host ?: url.substringAfter("://").substringBefore('/')
     } catch (e: Exception) {
@@ -137,21 +137,25 @@ object ReaderExtractor {
 
     // SSRF and Scheme Gate
     if (!com.remmi.browser.security.RedirectInspector.isSchemeSafeForNavigation(url)) {
-      return@withContext createFallbackArticle(url, currentTitle, domain, "Extraction blocked: Unsupported or unsafe URL scheme")
+      Log.w(TAG, "Reader extraction blocked: Unsupported or unsafe URL scheme ($url)")
+      return@withContext null
     }
 
     if (com.remmi.browser.security.NavigationSecurityAuthority.isPrivateOrLocalHost(domain, isGhost || com.remmi.browser.security.NetworkRouteAuthority.isOnionDestination(url))) {
-      return@withContext createFallbackArticle(url, currentTitle, domain, "Extraction blocked: Local/Private address targets are prohibited")
+      Log.w(TAG, "Reader extraction blocked: Local/Private address targets prohibited ($domain)")
+      return@withContext null
     }
 
     val isOnion = com.remmi.browser.security.NetworkRouteAuthority.isOnionDestination(url)
-    if ((isGhost || com.remmi.browser.security.NetworkRouteAuthority.isOnionDestination(url)) && !com.remmi.browser.security.CurrentTorRoute.isReady) {
-      return@withContext createFallbackArticle(url, currentTitle, domain, "Extraction blocked: Tor route is not verified")
+    if ((isGhost || isOnion) && !com.remmi.browser.security.CurrentTorRoute.isReady) {
+      Log.w(TAG, "Reader extraction blocked: Tor route is not verified")
+      return@withContext null
     }
 
     val runtime = com.remmi.browser.engine.GeckoEngineManager.getInstance(context).runtime
     if (runtime == null) {
-      return@withContext createFallbackArticle(url, currentTitle, domain, "Gecko runtime not available")
+      Log.w(TAG, "Reader extraction failed: Gecko runtime not available")
+      return@withContext null
     }
 
     try {
@@ -163,29 +167,33 @@ object ReaderExtractor {
 
         val response = executor.fetch(request).poll(15000)
         if (response == null) {
-          return@withTimeout createFallbackArticle(url, currentTitle, domain, "Request timed out")
+          Log.w(TAG, "Reader request timed out for $url")
+          return@withTimeout null
         }
         if (response.statusCode != 200) {
-           return@withTimeout createFallbackArticle(url, currentTitle, domain, "HTTP error ${response.statusCode}")
+          Log.w(TAG, "Reader fetch returned HTTP ${response.statusCode} for $url")
+          return@withTimeout null
         }
         
         val bodyStream = response.body
         if (bodyStream == null) {
-           return@withTimeout createFallbackArticle(url, currentTitle, domain, "Empty page response")
+          Log.w(TAG, "Reader fetch returned empty stream for $url")
+          return@withTimeout null
         }
         val html = Scanner(bodyStream, "UTF-8").useDelimiter("\\A").next()
         bodyStream.close()
         if (html.isBlank()) {
-           return@withTimeout createFallbackArticle(url, currentTitle, domain, "Empty page response")
+          Log.w(TAG, "Reader fetch body content is blank for $url")
+          return@withTimeout null
         }
         parseHtmlDocument(html, url, currentTitle, domain)
       }
     } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-      Log.e(TAG, "Reader extraction timed out for $url", e)
-      createFallbackArticle(url, currentTitle, domain, "Extraction timed out (20s limit)")
+      Log.e(TAG, "Reader extraction timed out (20s limit) for $url", e)
+      null
     } catch (e: Exception) {
       Log.e(TAG, "Failed to extract article from $url", e)
-      createFallbackArticle(url, currentTitle, domain, e.localizedMessage ?: "Extraction error")
+      null
     }
   }
 
@@ -194,7 +202,7 @@ object ReaderExtractor {
     url: String,
     fallbackTitle: String,
     domain: String,
-  ): ReaderArticle {
+  ): ReaderArticle? {
     val boundedHtml = if (html.length > 2_000_000) html.take(2_000_000) else html
     val doc: Document = Jsoup.parse(boundedHtml, url)
 
@@ -315,6 +323,11 @@ object ReaderExtractor {
       }
     }
 
+    if (paragraphs.isEmpty()) {
+      Log.w(TAG, "No readable paragraphs could be extracted from $url")
+      return null
+    }
+
     val totalWords = rawList.sumOf { it.split("\\s+".toRegex()).size }
     val readingTime = Math.max(1, Math.ceil(totalWords / 200.0).toInt())
 
@@ -327,28 +340,6 @@ object ReaderExtractor {
       readingTimeMinutes = readingTime,
       sourceUrl = url,
       leadImageUrl = leadImage,
-    )
-  }
-
-  private fun createFallbackArticle(
-    url: String,
-    title: String,
-    domain: String,
-    note: String
-  ): ReaderArticle {
-    val cleanTitle = title.ifBlank { "Article on $domain" }
-    val sampleParas = listOf(
-      ReaderParagraph(0, "Live reader mode extracted from $domain."),
-      ReaderParagraph(1, "Original source: $url"),
-      ReaderParagraph(2, "Status note: $note")
-    )
-    return ReaderArticle(
-      title = cleanTitle,
-      siteName = domain,
-      paragraphs = sampleParas,
-      rawTextList = sampleParas.map { it.text },
-      readingTimeMinutes = 1,
-      sourceUrl = url,
     )
   }
 

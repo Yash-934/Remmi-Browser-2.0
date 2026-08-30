@@ -1,5 +1,6 @@
 package com.remmi.browser.ui.components
 
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.animation.core.animateFloatAsState
@@ -54,7 +55,7 @@ fun BrowserView(
   onSecurityChange: (Boolean) -> Unit,
   onNavStateChange: (canGoBack: Boolean, canGoForward: Boolean) -> Unit,
   onTrackerBlocked: (url: String, type: String) -> Unit,
-  onReaderArticleExtracted: ((ReaderArticle) -> Unit)? = null,
+  onReaderArticleExtracted: ((ReaderArticle?) -> Unit)? = null,
   onContextMenuRequested: ((WebContextMenuData) -> Unit)? = null,
   onScrollChange: ((isScrollingDown: Boolean) -> Unit)? = null,
   modifier: Modifier = Modifier,
@@ -225,19 +226,8 @@ fun BrowserView(
 
         onReaderArticleExtracted?.invoke(extracted)
       } catch (e: Exception) {
-        val domain = tab.url.substringAfter("://").substringBefore('/')
-        val fallback = ReaderArticle(
-          title = tab.title.ifEmpty { "Article on $domain" },
-          siteName = domain,
-          paragraphs = listOf(
-            com.remmi.browser.reader.ReaderParagraph(0, "Extracted content from ${tab.title.ifEmpty { tab.url }}."),
-            com.remmi.browser.reader.ReaderParagraph(1, "Original page source: ${tab.url}")
-          ),
-          rawTextList = listOf("Extracted content from ${tab.title.ifEmpty { tab.url }}."),
-          readingTimeMinutes = 1,
-          sourceUrl = tab.url,
-        )
-        onReaderArticleExtracted?.invoke(fallback)
+        Log.e("BrowserView", "Failed to extract clean reader article for ${tab.url}", e)
+        onReaderArticleExtracted?.invoke(null)
       }
     }
   }

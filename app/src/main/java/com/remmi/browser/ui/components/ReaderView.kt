@@ -172,6 +172,16 @@ fun ReaderView(
   var isTranslating by remember { mutableStateOf(false) }
   var translationProgress by remember { mutableStateOf(0f) }
   var isShowingOriginal by remember { mutableStateOf(false) }
+  var extractionTimedOut by remember(article) { mutableStateOf(false) }
+
+  LaunchedEffect(article) {
+    if (article == null) {
+      kotlinx.coroutines.delay(6000L)
+      extractionTimedOut = true
+    } else {
+      extractionTimedOut = false
+    }
+  }
 
   // Highlights Store (Paragraph index -> Highlight)
   val highlights = remember { mutableStateMapOf<Int, ReaderHighlight>() }
@@ -481,31 +491,113 @@ fun ReaderView(
         contentAlignment = Alignment.TopCenter
       ) {
         if (displayArticle == null) {
-          // Loading / Parsing state
+          if (extractionTimedOut) {
+            Column(
+              modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+              verticalArrangement = Arrangement.Center,
+              horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+              Icon(
+                imageVector = Icons.Default.MenuBook,
+                contentDescription = null,
+                tint = readerTheme.accentColor.copy(alpha = 0.6f),
+                modifier = Modifier.size(48.dp)
+              )
+              Spacer(modifier = Modifier.height(16.dp))
+              Text(
+                text = "READER MODE UNAVAILABLE",
+                fontFamily = ThemeCyber.fontFamily,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = readerTheme.textColor
+              )
+              Spacer(modifier = Modifier.height(8.dp))
+              Text(
+                text = "Could not extract article content from this page. Some pages do not contain standard article bodies.",
+                fontFamily = fontChoice.fontFamily,
+                fontSize = 13.sp,
+                color = readerTheme.textColor.copy(alpha = 0.7f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 400.dp)
+              )
+              Spacer(modifier = Modifier.height(20.dp))
+              Button(
+                onClick = onClose,
+                colors = ButtonDefaults.buttonColors(containerColor = readerTheme.accentColor),
+                shape = RoundedCornerShape(8.dp)
+              ) {
+                Text("Exit Reader Mode", color = Color.Black, fontWeight = FontWeight.Bold)
+              }
+            }
+          } else {
+            // Loading / Parsing state
+            Column(
+              modifier = Modifier.fillMaxSize(),
+              verticalArrangement = Arrangement.Center,
+              horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+              CircularProgressIndicator(
+                color = readerTheme.accentColor,
+                modifier = Modifier.size(36.dp)
+              )
+              Spacer(modifier = Modifier.height(14.dp))
+              Text(
+                text = "EXTRACTING CLEAN ARTICLE CONTENT...",
+                fontFamily = ThemeCyber.fontFamily,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = readerTheme.accentColor
+              )
+              Spacer(modifier = Modifier.height(6.dp))
+              Text(
+                text = "Stripping ads, clutter, and tracking scripts",
+                fontFamily = fontChoice.fontFamily,
+                fontSize = 11.sp,
+                color = readerTheme.textColor.copy(alpha = 0.6f)
+              )
+            }
+          }
+        } else if (displayArticle.activeParagraphs.isEmpty()) {
           Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+              .fillMaxSize()
+              .padding(24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
           ) {
-            CircularProgressIndicator(
-              color = readerTheme.accentColor,
-              modifier = Modifier.size(36.dp)
+            Icon(
+              imageVector = Icons.Default.MenuBook,
+              contentDescription = null,
+              tint = readerTheme.accentColor.copy(alpha = 0.6f),
+              modifier = Modifier.size(48.dp)
             )
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
-              text = "EXTRACTING CLEAN ARTICLE CONTENT...",
+              text = "NO READABLE CONTENT FOUND",
               fontFamily = ThemeCyber.fontFamily,
-              fontSize = 12.sp,
+              fontSize = 15.sp,
               fontWeight = FontWeight.Bold,
-              color = readerTheme.accentColor
+              color = readerTheme.textColor
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
-              text = "Stripping ads, clutter, and tracking scripts",
+              text = "This page does not have readable text content to display in Reader Mode.",
               fontFamily = fontChoice.fontFamily,
-              fontSize = 11.sp,
-              color = readerTheme.textColor.copy(alpha = 0.6f)
+              fontSize = 13.sp,
+              color = readerTheme.textColor.copy(alpha = 0.7f),
+              textAlign = TextAlign.Center,
+              modifier = Modifier.widthIn(max = 400.dp)
             )
+            Spacer(modifier = Modifier.height(20.dp))
+            Button(
+              onClick = onClose,
+              colors = ButtonDefaults.buttonColors(containerColor = readerTheme.accentColor),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Exit Reader Mode", color = Color.Black, fontWeight = FontWeight.Bold)
+            }
           }
         } else {
           Column(

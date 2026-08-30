@@ -588,7 +588,7 @@ fun NewTabPage(
                 )
               }
             } else {
-              // QR Code Scanner Action
+              // Paste from Clipboard Action
               IconButton(
                 onClick = {
                   val clip = clipboard.getCopiedUrl()
@@ -596,14 +596,14 @@ fun NewTabPage(
                     searchQuery = clip
                     Toast.makeText(context, "Pasted from clipboard", Toast.LENGTH_SHORT).show()
                   } else {
-                    Toast.makeText(context, "Camera QR Scanner ready", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
                   }
                 },
                 modifier = Modifier.size(32.dp)
               ) {
                 Icon(
-                  imageVector = Icons.Default.QrCodeScanner,
-                  contentDescription = "Scan QR Code",
+                  imageVector = Icons.Default.ContentPaste,
+                  contentDescription = "Paste URL from Clipboard",
                   tint = if (isLight) Color(0xFF64748B) else Color(0xFF94A3B8),
                   modifier = Modifier.size(20.dp)
                 )
@@ -923,7 +923,7 @@ fun NewTabPage(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
           ) {
             Text(
-              text = "Favorites",
+              text = "Quick Links",
               color = if (isLight) Color(0xFF0F172A) else Color(0xFFF8FAFC),
               fontSize = 16.sp,
               fontWeight = FontWeight.Bold
@@ -934,7 +934,7 @@ fun NewTabPage(
             ) {
               Icon(
                 imageVector = if (isFavoritesEditMode) Icons.Default.Check else Icons.Default.Edit,
-                contentDescription = "Edit Favorites",
+                contentDescription = "Edit Quick Links",
                 tint = if (isFavoritesEditMode) ThemeCyber.colors.primary else if (isLight) Color(0xFF94A3B8) else Color(0xFF64748B),
                 modifier = Modifier.size(16.dp)
               )
@@ -1032,199 +1032,6 @@ fun NewTabPage(
               onClick = { showAddDialog = true },
               modifier = Modifier.width(68.dp)
             )
-          }
-        }
-      }
-
-      // ==========================================
-      // 7. DISCOVER / SMART GLANCE CARD
-      // ==========================================
-      Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = if (isLight) Color.White else Color(0xFF131B26),
-        border = BorderStroke(1.dp, if (isLight) Color(0xFFE2E8F0) else Color(0xFF1E293B)),
-        shadowElevation = if (isLight) 2.dp else 0.dp,
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(top = 4.dp, bottom = 12.dp)
-          .testTag("home_discover_card")
-      ) {
-        Column(
-          modifier = Modifier
-            .fillMaxWidth()
-            .padding(14.dp),
-          verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-          // Discover Header
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-          ) {
-            Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-              Text(
-                text = "✨ Discover",
-                color = if (isLight) Color(0xFF0F172A) else Color(0xFFF8FAFC),
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-              )
-            }
-            IconButton(
-              onClick = {
-                Toast.makeText(context, "Feed refreshed", Toast.LENGTH_SHORT).show()
-              },
-              modifier = Modifier.size(24.dp)
-            ) {
-              Icon(
-                imageVector = Icons.Default.Refresh,
-                contentDescription = "Refresh Feed",
-                tint = if (isLight) Color(0xFF94A3B8) else Color(0xFF64748B),
-                modifier = Modifier.size(16.dp)
-              )
-            }
-          }
-
-          // Featured Discover Story Item
-          Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = if (isLight) Color(0xFFF8FAFC) else Color(0xFF1E293B).copy(alpha = 0.6f),
-            modifier = Modifier
-              .fillMaxWidth()
-              .clip(RoundedCornerShape(14.dp))
-              .clickable {
-                onNavigate("https://duckduckgo.com/?q=Earth's+hidden+oceans+water+reserves")
-              }
-          ) {
-            Row(
-              modifier = Modifier
-                .fillMaxWidth()
-                .padding(10.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-              // Story Thumbnail / Art
-              Box(
-                modifier = Modifier
-                  .size(62.dp)
-                  .clip(RoundedCornerShape(10.dp))
-                  .background(
-                    Brush.linearGradient(
-                      listOf(Color(0xFF0284C7), Color(0xFF0EA5E9), Color(0xFF38BDF8))
-                    )
-                  ),
-                contentAlignment = Alignment.Center
-              ) {
-                Icon(
-                  imageVector = Icons.Default.WaterDrop,
-                  contentDescription = null,
-                  tint = Color.White,
-                  modifier = Modifier.size(28.dp)
-                )
-              }
-
-              // Story Content
-              Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-              ) {
-                Text(
-                  text = "Earth's hidden oceans may hold more water than all surface lakes combined",
-                  color = if (isLight) Color(0xFF0F172A) else Color(0xFFF8FAFC),
-                  fontSize = 13.sp,
-                  fontWeight = FontWeight.SemiBold,
-                  maxLines = 2,
-                  overflow = TextOverflow.Ellipsis
-                )
-                Row(
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                  Text(
-                    text = "BBC Science",
-                    color = ThemeCyber.colors.primary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                  )
-                  Text(
-                    text = "• 4h ago",
-                    color = if (isLight) Color(0xFF64748B) else Color(0xFF94A3B8),
-                    fontSize = 11.sp
-                  )
-                }
-              }
-            }
-          }
-
-          // Weather & Privacy Glance Strip
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-          ) {
-            // Weather Glance
-            Surface(
-              shape = RoundedCornerShape(12.dp),
-              color = if (isLight) Color(0xFFFFFBEB) else Color(0xFF282315),
-              border = BorderStroke(1.dp, if (isLight) Color(0xFFFDE68A) else Color(0xFF45391C)),
-              modifier = Modifier.weight(1f)
-            ) {
-              Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-              ) {
-                Text(text = "☀️", fontSize = 18.sp)
-                Column {
-                  Text(
-                    text = "32°C",
-                    color = if (isLight) Color(0xFFB45309) else Color(0xFFFBBF24),
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Bold
-                  )
-                  Text(
-                    text = "Sunny • Clear",
-                    color = if (isLight) Color(0xFF92400E) else Color(0xFFD97706),
-                    fontSize = 10.5.sp
-                  )
-                }
-              }
-            }
-
-            // Protection Glance
-            Surface(
-              shape = RoundedCornerShape(12.dp),
-              color = if (isLight) Color(0xFFF0FDF4) else Color(0xFF14291D),
-              border = BorderStroke(1.dp, if (isLight) Color(0xFFBBF7D0) else Color(0xFF1F4D2E)),
-              modifier = Modifier.weight(1f)
-            ) {
-              Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-              ) {
-                Icon(
-                  imageVector = Icons.Default.Shield,
-                  contentDescription = null,
-                  tint = Color(0xFF16A34A),
-                  modifier = Modifier.size(18.dp)
-                )
-                Column {
-                  Text(
-                    text = "Zero Trackers",
-                    color = if (isLight) Color(0xFF15803D) else Color(0xFF4ADE80),
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Bold
-                  )
-                  Text(
-                    text = "Encrypted DNS",
-                    color = if (isLight) Color(0xFF166534) else Color(0xFF22C55E),
-                    fontSize = 10.5.sp
-                  )
-                }
-              }
-            }
           }
         }
       }
