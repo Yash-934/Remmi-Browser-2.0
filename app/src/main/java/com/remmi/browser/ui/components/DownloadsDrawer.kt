@@ -35,6 +35,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +67,7 @@ fun DownloadsDrawer(
   val context = LocalContext.current
   val downloadHandler = remember { DownloadHandler.getInstance(context) }
   val activeDownloads by downloadHandler.activeDownloads.collectAsState()
+  val scope = rememberCoroutineScope()
   val dateFormatter = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
   val accentColor = ThemeCyber.colors.primary
 
@@ -175,7 +178,9 @@ fun DownloadsDrawer(
             accentColor = accentColor,
             dateFormatter = dateFormatter,
             formatFileSize = { formatFileSize(it) },
-            onCancelDownload = { downloadHandler.cancelDownload(item.downloadId) },
+            onCancelDownload = { 
+              scope.launch { downloadHandler.cancelDownload(item.downloadId) } 
+            },
             onDeleteLog = { onDeleteDownload(item) },
             onDeleteDevice = {
               try {

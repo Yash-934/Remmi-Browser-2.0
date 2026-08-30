@@ -70,8 +70,11 @@ fun VaultRecoveryScreen(
         )
         Spacer(modifier = Modifier.height(24.dp))
         
+        val context = androidx.compose.ui.platform.LocalContext.current
         OutlinedButton(
-          onClick = { exitProcess(0) },
+          onClick = { 
+            (context as? android.app.Activity)?.recreate() 
+          },
           colors = ButtonDefaults.outlinedButtonColors(
             contentColor = ThemeCyber.colors.textPrimary
           ),
@@ -89,27 +92,6 @@ fun VaultRecoveryScreen(
           )
         }
         
-        Spacer(modifier = Modifier.height(12.dp))
-        
-        Button(
-          onClick = { /* TODO: Implement Backup Restore */ },
-          colors = ButtonDefaults.buttonColors(
-            containerColor = ThemeCyber.colors.surfaceLight,
-            contentColor = ThemeCyber.colors.textPrimary
-          ),
-          shape = RoundedCornerShape(12.dp),
-          modifier = Modifier
-            .fillMaxWidth()
-            .height(46.dp)
-        ) {
-          Text(
-            text = "RESTORE BACKUP",
-            fontWeight = FontWeight.Bold,
-            fontFamily = ThemeCyber.fontFamily,
-            fontSize = 13.sp
-          )
-        }
-
         Spacer(modifier = Modifier.height(12.dp))
         
         Button(

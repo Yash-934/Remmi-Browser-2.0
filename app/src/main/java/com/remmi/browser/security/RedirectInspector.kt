@@ -196,40 +196,40 @@ object RedirectInspector {
       }
     }
 
-    val clientBuilder = OkHttpClient.Builder()
-      .followRedirects(false)
-      .followSslRedirects(false)
-      .connectTimeout(5, TimeUnit.SECONDS)
-      .readTimeout(5, TimeUnit.SECONDS)
-      .callTimeout(10, TimeUnit.SECONDS)
-
-    if (isGhost) {
-      try {
-        clientBuilder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort!!)))
-      } catch (e: Exception) {
-        Log.w(TAG, "Failed to configure Tor SOCKS proxy for redirect inspection: ${e.message}")
-        return@withContext RedirectInspectionResult(
-          originalUrl = originalUrl,
-          finalUrl = null,
-          status = RedirectResolutionStatus.TOR_ROUTE_LOST,
-          hops = emptyList(),
-          hasTrackingParams = hasTrackingParams(originalUrl),
-          strippedUrl = strippedOriginal,
-          isSecure = originalUrl.startsWith("https://", ignoreCase = true),
-          safetyScore = 0,
-          riskLevel = SecurityRiskLevel.BLOCKED,
-          securityInsights = listOf("Failed to bind to Tor proxy socket: ${e.message}"),
-          error = "Tor proxy socket failure: ${e.message}",
-          extractedNestedUrl = extractedNested,
-          actualBrowserLandedUrl = actualBrowserLandedUrl
-        )
-      }
-    } else {
-      // For Clearnet/Shield mode, enforce active DNS Rebinding verification
-      clientBuilder.dns(antiRebindingDns)
+    val client = try {
+      NetworkRouteAuthority.createHttpClient(
+        isGhost = isGhost,
+        targetUrl = originalUrl,
+        connectTimeoutSeconds = 5L,
+        readTimeoutSeconds = 5L,
+        followRedirects = false
+      ).newBuilder()
+        .followSslRedirects(false)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .apply {
+          if (!isGhost) {
+            dns(antiRebindingDns)
+          }
+        }
+        .build()
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to create authorized client for redirect inspection: ${e.message}")
+      return@withContext RedirectInspectionResult(
+        originalUrl = originalUrl,
+        finalUrl = null,
+        status = RedirectResolutionStatus.TOR_ROUTE_LOST,
+        hops = emptyList(),
+        hasTrackingParams = hasTrackingParams(originalUrl),
+        strippedUrl = strippedOriginal,
+        isSecure = originalUrl.startsWith("https://", ignoreCase = true),
+        safetyScore = 0,
+        riskLevel = SecurityRiskLevel.BLOCKED,
+        securityInsights = listOf("Failed to bind to network authority: ${e.message}"),
+        error = "Network routing failure: ${e.message}",
+        extractedNestedUrl = extractedNested,
+        actualBrowserLandedUrl = actualBrowserLandedUrl
+      )
     }
-
-    val client = clientBuilder.build()
 
     while (hopCount < MAX_HOPS) {
       hopCount++

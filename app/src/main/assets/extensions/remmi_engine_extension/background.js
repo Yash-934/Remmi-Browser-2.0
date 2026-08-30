@@ -56,12 +56,20 @@ function connectNative() {
           }).then((res) => {
             let html = (res && res[0]) ? res[0] : "";
             const MAX_HTML_BYTES = 2 * 1024 * 1024; // 2MB limit for bridge
-            if (html.length > MAX_HTML_BYTES) {
+            if (new Blob([html]).size > MAX_HTML_BYTES) {
                html = html.substring(0, MAX_HTML_BYTES) + "<!-- Truncated by Remmi Native Bridge -->";
             }
             if (port) port.postMessage({ type: "EXTRACTED_HTML", html: html, url: "", requestId: requestId, tabId: tabId });
           }).catch(e => {
             if (port) port.postMessage({ type: "EXTRACTED_HTML", html: "", url: "", requestId: requestId, tabId: tabId });
+          });
+        }
+      } else if (msg.type === "EXECUTE_SCRIPT") {
+        const tabId = msg.tabId;
+        const scriptCode = msg.script;
+        if (tabId !== undefined && tabId !== null && scriptCode) {
+          browser.tabs.executeScript(tabId, { code: scriptCode }).catch(e => {
+            console.error("[Remmi] EXECUTE_SCRIPT failed", e);
           });
         }
       }

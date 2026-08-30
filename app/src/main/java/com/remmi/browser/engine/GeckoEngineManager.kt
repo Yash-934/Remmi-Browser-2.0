@@ -385,9 +385,21 @@ class GeckoEngineManager private constructor(private val context: Context) {
         val isGhost = (tab?.profile == PrivacyProfile.GHOST) || (currentProfile == PrivacyProfile.GHOST)
         
         val check = com.remmi.browser.security.NavigationSecurityAuthority.validateAndSanitizeNavigation(url, isGhost)
-        if (check.decision == com.remmi.browser.security.NavigationDecision.BLOCK) {
-          Log.e(TAG, "onLoadRequest blocked navigation: ${check.reason}")
-          return GeckoResult.fromValue(AllowOrDeny.DENY)
+        when (check.decision) {
+            com.remmi.browser.security.NavigationDecision.BLOCK -> {
+                Log.e(TAG, "onLoadRequest blocked navigation: ${check.reason}")
+                return GeckoResult.fromValue(AllowOrDeny.DENY)
+            }
+            com.remmi.browser.security.NavigationDecision.SANITIZE_AND_LOAD,
+            com.remmi.browser.security.NavigationDecision.REDIRECT_SEARCH -> {
+                if (check.sanitizedUrl != null && check.sanitizedUrl != url) {
+                    session.loadUri(check.sanitizedUrl)
+                    return GeckoResult.fromValue(AllowOrDeny.DENY)
+                }
+            }
+            com.remmi.browser.security.NavigationDecision.ALLOW -> {
+                // proceed
+            }
         }
         return GeckoResult.fromValue(AllowOrDeny.ALLOW)
       }
@@ -723,10 +735,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
   }
 
   fun executeScript(tabId: String, script: String) {
-    onMainSession(tabId, "EXECUTE_SCRIPT") { session ->
-      val formatted = if (script.startsWith("javascript:", ignoreCase = true)) script else "javascript:$script"
-      session.loadUri(formatted)
-    }
+    com.remmi.adblock.BlockExtension.getInstance().executeScript(tabId, script)
   }
 
   fun printPage(activityContext: Context, tabId: String, pageTitle: String, onFinished: (() -> Unit)? = null) {

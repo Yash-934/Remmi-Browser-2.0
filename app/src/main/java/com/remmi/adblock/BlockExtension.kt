@@ -320,6 +320,25 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     }
   }
 
+  fun executeScript(tabId: String, script: String) {
+    val cleanScript = if (script.startsWith("javascript:", ignoreCase = true)) script.substring(11) else script
+    val msg = JSONObject().apply {
+      put("type", "EXECUTE_SCRIPT")
+      put("tabId", tabId)
+      put("script", cleanScript)
+    }
+    synchronized(portLock) {
+      val currentPort = activePort
+      if (currentPort != null) {
+        try {
+          currentPort.postMessage(msg)
+        } catch (e: Exception) {
+          log("[WEBEXT] Could not send execute_script: ${e.message}")
+        }
+      }
+    }
+  }
+
   fun extractActiveTabHtml() {
     extractTabHtml(null, null, UUID.randomUUID().toString(), null)
   }

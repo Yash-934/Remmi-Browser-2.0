@@ -613,34 +613,6 @@ fun TabGridSheet(
           fontWeight = FontWeight.Medium
         )
       }
-
-      // [ Tor ] Pill Button
-      OutlinedButton(
-        onClick = {
-          onNewTab(PrivacyProfile.GHOST, null)
-          onDismiss()
-        },
-        border = BorderStroke(1.dp, torPurple.copy(alpha = 0.6f)),
-        colors = ButtonDefaults.outlinedButtonColors(
-          containerColor = torPurple.copy(alpha = if (isDark) 0.15f else 0.10f)
-        ),
-        shape = RoundedCornerShape(12.dp),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-      ) {
-        Icon(
-          painter = painterResource(R.drawable.ic_tor),
-          contentDescription = "New Tor Tab",
-          tint = torPurple,
-          modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-          text = "Tor",
-          fontSize = 12.5.sp,
-          color = torPurple,
-          fontWeight = FontWeight.Bold
-        )
-      }
     }
 
     Spacer(modifier = Modifier.height(10.dp))

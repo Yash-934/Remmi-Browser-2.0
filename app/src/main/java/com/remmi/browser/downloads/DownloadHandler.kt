@@ -96,19 +96,20 @@ class DownloadHandler(private val context: Context) {
     activeJobs[downloadId] = job
   }
 
-  fun cancelDownload(downloadId: Long) {
-    activeJobs[downloadId]?.cancel()
+  suspend fun cancelDownload(downloadId: Long) {
+    activeJobs[downloadId]?.cancelAndJoin()
     activeJobs.remove(downloadId)
     _activeDownloads.value = _activeDownloads.value - downloadId
 
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
     notificationManager?.cancel(downloadId.toInt())
 
-    scope.launch {
-      val db = RemmiDatabase.getDatabaseAsync(context)
-      db.downloadDao().updateStatus(downloadId, "CANCELLED")
+    val db = RemmiDatabase.getDatabaseAsync(context)
+    db.downloadDao().updateStatus(downloadId, "CANCELLED")
+    
+    withContext(Dispatchers.Main) {
+      Toast.makeText(context, "Download cancelled", Toast.LENGTH_SHORT).show()
     }
-    Toast.makeText(context, "Download cancelled", Toast.LENGTH_SHORT).show()
   }
 
   private suspend fun performManagedDownload(
@@ -140,6 +141,17 @@ class DownloadHandler(private val context: Context) {
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     val notifId = (downloadId % Int.MAX_VALUE).toInt()
 
+    val MAX_DOWNLOAD_SIZE_BYTES = 5L * 1024L * 1024L * 1024L // 5GB Hard cap
+    if (contentLength > MAX_DOWNLOAD_SIZE_BYTES) {
+      val notif = NotificationCompat.Builder(context, CHANNEL_ID)
+          .setContentTitle("Download rejected: $fileName")
+          .setContentText("File exceeds 5GB limit.")
+          .setSmallIcon(android.R.drawable.stat_sys_warning)
+          .setAutoCancel(true).build()
+      notificationManager.notify(notifId, notif)
+      return
+    }
+
     // Register active download info
     val initialInfo = DownloadProgressInfo(
       downloadId = downloadId,
@@ -159,19 +171,7 @@ class DownloadHandler(private val context: Context) {
       .setProgress(100, 0, contentLength <= 0)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
-
     notificationManager.notify(notifId, notifBuilder.build())
-
-    val MAX_DOWNLOAD_SIZE_BYTES = 5L * 1024L * 1024L * 1024L // 5GB Hard cap
-    if (contentLength > MAX_DOWNLOAD_SIZE_BYTES) {
-      val notif = NotificationCompat.Builder(context, CHANNEL_ID)
-          .setContentTitle("Download rejected: $fileName")
-          .setContentText("File exceeds 5GB limit.")
-          .setSmallIcon(android.R.drawable.stat_sys_warning)
-          .setAutoCancel(true).build()
-      notificationManager.notify(notifId, notif)
-      return
-    }
 
     val db = RemmiDatabase.getDatabaseAsync(context)
     var allocatedUri: android.net.Uri? = null

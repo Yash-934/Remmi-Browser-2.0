@@ -83,8 +83,7 @@ object NetworkRouteAuthority {
     targetUrl: String? = null,
     connectTimeoutSeconds: Long = 15L,
     readTimeoutSeconds: Long = 20L,
-    followRedirects: Boolean = true,
-    customConfig: (OkHttpClient.Builder.() -> Unit)? = null
+    followRedirects: Boolean = true
   ): OkHttpClient {
     val isOnion = targetUrl != null && isOnionDestination(targetUrl)
     val requiresTor = isGhost || isOnion
@@ -97,7 +96,6 @@ object NetworkRouteAuthority {
     if (requiresTor) {
       val route = CurrentTorRoute.route.value
       val socksPort = route.socksPort
-
       val isRouteValid = route.isGhostActive &&
         socksPort != null &&
         socksPort > 0 &&
@@ -116,7 +114,6 @@ object NetworkRouteAuthority {
       Log.d(TAG, "Configured OkHttpClient via verified Tor SOCKS5 proxy on 127.0.0.1:$socksPort (gen=${route.generation})")
     }
 
-    customConfig?.invoke(builder)
     return builder.build()
   }
 
@@ -129,8 +126,7 @@ object NetworkRouteAuthority {
     targetUrl: String? = null,
     connectTimeoutSeconds: Long = 15L,
     readTimeoutSeconds: Long = 20L,
-    followRedirects: Boolean = true,
-    customConfig: (OkHttpClient.Builder.() -> Unit)? = null
+    followRedirects: Boolean = true
   ): OkHttpClient? {
     return try {
       createHttpClient(
@@ -138,8 +134,7 @@ object NetworkRouteAuthority {
         targetUrl = targetUrl,
         connectTimeoutSeconds = connectTimeoutSeconds,
         readTimeoutSeconds = readTimeoutSeconds,
-        followRedirects = followRedirects,
-        customConfig = customConfig
+        followRedirects = followRedirects
       )
     } catch (e: Exception) {
       Log.w(TAG, "Failed to create route-authorized HTTP client: ${e.message}")
