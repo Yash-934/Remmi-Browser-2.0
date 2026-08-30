@@ -42,6 +42,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.remmi.browser.security.CurrentTorRoute
+import com.remmi.browser.security.GhostRoutePhase
 import com.remmi.browser.security.TorCircuit
 import com.remmi.browser.security.TorManager
 import com.remmi.browser.ui.theme.CyberMonoFamily
@@ -102,6 +104,9 @@ fun CircuitVisualizerSheet(
 
     Spacer(modifier = Modifier.height(14.dp))
 
+    val currentPort = circuit?.socksPort ?: (torState as? TorManager.TorState.READY)?.port ?: CurrentTorRoute.currentSocksPort ?: 0
+    val currentPhase = CurrentTorRoute.currentPhase
+
     // SOCKS5 Status Card
     Card(
       colors = CardDefaults.cardColors(containerColor = ThemeCyber.colors.surface),
@@ -111,33 +116,30 @@ fun CircuitVisualizerSheet(
         .border(1.dp, ThemeCyber.colors.torPurple.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
     ) {
       Column(modifier = Modifier.padding(14.dp)) {
-        val currentPort = circuit?.socksPort ?: (torState as? TorManager.TorState.READY)?.port ?: com.remmi.browser.security.CurrentTorRoute.currentSocksPort ?: 0
-
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically,
         ) {
           Text(
-            text = "CIRCUIT ID: ${circuit?.circuitId ?: if (torState is TorManager.TorState.READY) "ACTIVE" else "INACTIVE"}",
+            text = "CIRCUIT ID: ${circuit?.circuitId ?: if (CurrentTorRoute.isReady) "ACTIVE" else "INACTIVE"}",
             color = ThemeCyber.colors.torPurple,
             fontFamily = CyberMonoFamily,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
           )
 
-          val (badgeText, badgeColor) = when (torState) {
-            is TorManager.TorState.READY -> Pair("ROUTED ($currentPort)", ThemeCyber.colors.successGreen)
-            is TorManager.TorState.STARTING_SERVICE -> Pair("STARTING", ThemeCyber.colors.warningYellow)
-            is TorManager.TorState.SERVICE_FOREGROUND_CONFIRMED -> Pair("ACTIVE 20%", ThemeCyber.colors.warningYellow)
-            is TorManager.TorState.TOR_BOOTSTRAPPING -> Pair("${torState.progress}%", ThemeCyber.colors.warningYellow)
-            is TorManager.TorState.TOR_CIRCUIT_ESTABLISHED -> Pair("CIRCUIT 70%", ThemeCyber.colors.torPurple)
-            is TorManager.TorState.SOCKS_DISCOVERY -> Pair("SOCKS 80%", ThemeCyber.colors.torPurple)
-            is TorManager.TorState.SOCKS5_VERIFY -> Pair("SOCKS5 85%", ThemeCyber.colors.torPurple)
-            is TorManager.TorState.REMOTE_TOR_VERIFY -> Pair("VERIFYING", ThemeCyber.colors.torPurple)
-            is TorManager.TorState.FAILED -> Pair("BLOCKED", ThemeCyber.colors.dangerRed)
-            is TorManager.TorState.STOPPING -> Pair("STOPPING", ThemeCyber.colors.textMuted)
-            is TorManager.TorState.OFF -> Pair("OFFLINE", ThemeCyber.colors.textMuted)
+          val (badgeText, badgeColor) = when {
+            CurrentTorRoute.isReady -> Pair("GHOST READY ($currentPort)", ThemeCyber.colors.successGreen)
+            currentPhase == GhostRoutePhase.ROTATING -> Pair("ROTATING CIRCUIT", ThemeCyber.colors.torPurple)
+            currentPhase == GhostRoutePhase.STARTING_TOR -> Pair("STARTING TOR", ThemeCyber.colors.warningYellow)
+            currentPhase == GhostRoutePhase.VERIFYING_TOR -> Pair("VERIFYING TOR", ThemeCyber.colors.warningYellow)
+            currentPhase == GhostRoutePhase.APPLYING_GECKO -> Pair("APPLYING PROXY", ThemeCyber.colors.torPurple)
+            currentPhase == GhostRoutePhase.VERIFYING_GECKO -> Pair("VERIFYING ROUTE", ThemeCyber.colors.torPurple)
+            torState is TorManager.TorState.FAILED -> Pair("BLOCKED", ThemeCyber.colors.dangerRed)
+            torState is TorManager.TorState.STOPPING -> Pair("STOPPING", ThemeCyber.colors.textMuted)
+            torState is TorManager.TorState.OFF -> Pair("OFFLINE", ThemeCyber.colors.textMuted)
+            else -> Pair("INITIALIZING", ThemeCyber.colors.warningYellow)
           }
 
           Row(
@@ -166,17 +168,17 @@ fun CircuitVisualizerSheet(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        when (torState) {
-          is TorManager.TorState.READY -> {
+        when {
+          CurrentTorRoute.isReady -> {
             Text(
               text = "SOCKS5 127.0.0.1:$currentPort // FAILOVER_DIRECT=FALSE // REMOTE DNS",
               color = ThemeCyber.colors.successGreen,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
-            if (circuit?.isVerifiedTor == true) {
+            if (circuit?.isVerifiedTor == true || CurrentTorRoute.isVerified) {
               Text(
-                text = "✓ Verified with check.torproject.org (Exit IP: ${circuit.verifiedExitIp ?: "Protected"})",
+                text = "✓ Verified with check.torproject.org (Exit IP: ${circuit?.verifiedExitIp ?: CurrentTorRoute.exitIp ?: "Protected"})",
                 color = ThemeCyber.colors.primary,
                 fontFamily = CyberMonoFamily,
                 fontSize = 10.sp,
@@ -184,63 +186,47 @@ fun CircuitVisualizerSheet(
               )
             }
           }
-          is TorManager.TorState.STARTING_SERVICE -> {
+          currentPhase == GhostRoutePhase.ROTATING -> {
             Text(
-              text = "Launching Tor foreground service...",
+              text = "Rotating Tor onion circuit via SIGNAL NEWNYM...",
+              color = ThemeCyber.colors.torPurple,
+              fontFamily = CyberMonoFamily,
+              fontSize = 10.sp,
+            )
+          }
+          currentPhase == GhostRoutePhase.STARTING_TOR -> {
+            Text(
+              text = "Launching native Tor daemon & confirming foreground service...",
               color = ThemeCyber.colors.warningYellow,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.SERVICE_FOREGROUND_CONFIRMED -> {
+          currentPhase == GhostRoutePhase.VERIFYING_TOR -> {
             Text(
-              text = "Foreground service confirmed. Initializing onion daemon...",
+              text = "Verifying Tor daemon SOCKS5 protocol and remote exit routing...",
               color = ThemeCyber.colors.warningYellow,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.TOR_BOOTSTRAPPING -> {
+          currentPhase == GhostRoutePhase.APPLYING_GECKO -> {
             Text(
-              text = "${torState.progress}% • ${torState.status}",
-              color = ThemeCyber.colors.warningYellow,
-              fontFamily = CyberMonoFamily,
-              fontSize = 10.sp,
-            )
-          }
-          is TorManager.TorState.TOR_CIRCUIT_ESTABLISHED -> {
-            Text(
-              text = "Circuit created. Discovering SOCKS listener...",
+              text = "Applying hardened proxy preferences to GeckoView engine...",
               color = ThemeCyber.colors.torPurple,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.SOCKS_DISCOVERY -> {
+          currentPhase == GhostRoutePhase.VERIFYING_GECKO -> {
             Text(
-              text = "Probing SOCKS port ${torState.candidatePort}...",
+              text = "Verifying end-to-end browser route through Tor...",
               color = ThemeCyber.colors.torPurple,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.SOCKS5_VERIFY -> {
-            Text(
-              text = "Verifying RFC 1928 SOCKS5 handshake on port ${torState.port}...",
-              color = ThemeCyber.colors.torPurple,
-              fontFamily = CyberMonoFamily,
-              fontSize = 10.sp,
-            )
-          }
-          is TorManager.TorState.REMOTE_TOR_VERIFY -> {
-            Text(
-              text = "Verifying onion exit routing with check.torproject.org (attempt ${torState.attempt})...",
-              color = ThemeCyber.colors.torPurple,
-              fontFamily = CyberMonoFamily,
-              fontSize = 10.sp,
-            )
-          }
-          is TorManager.TorState.FAILED -> {
+          torState is TorManager.TorState.FAILED -> {
             Text(
               text = "[${torState.category}] ${torState.message}",
               color = ThemeCyber.colors.dangerRed,
@@ -248,7 +234,7 @@ fun CircuitVisualizerSheet(
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.STOPPING -> {
+          torState is TorManager.TorState.STOPPING -> {
             Text(
               text = "Stopping Tor onion service...",
               color = ThemeCyber.colors.textMuted,
@@ -256,314 +242,233 @@ fun CircuitVisualizerSheet(
               fontSize = 10.sp,
             )
           }
-          is TorManager.TorState.OFF -> {
+          torState is TorManager.TorState.OFF -> {
             Text(
-              text = "Ghost Mode proxy inactive. Start Tor to route encrypted traffic.",
+              text = "Direct Clearnet Active (Shield Mode). Tor is offline.",
               color = ThemeCyber.colors.textMuted,
               fontFamily = CyberMonoFamily,
               fontSize = 10.sp,
             )
           }
         }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Action Buttons Row
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          if (torState is TorManager.TorState.READY) {
-            Button(
-              onClick = onRotateCircuit,
-              colors = ButtonDefaults.buttonColors(
-                containerColor = ThemeCyber.colors.torPurple,
-                contentColor = ThemeCyber.colors.backgroundDarker,
-              ),
-              shape = RoundedCornerShape(6.dp),
-              modifier = Modifier
-                .weight(1f)
-                .height(38.dp)
-                .testTag("circuit_new_identity_button")
-            ) {
-              Icon(
-                imageVector = Icons.Default.Autorenew,
-                contentDescription = null,
-                modifier = Modifier.size(15.dp),
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              Text(
-                text = "NEW IDENTITY",
-                fontFamily = CyberMonoFamily,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-              )
-            }
-          } else {
-            Button(
-              onClick = { onStartTor?.invoke() },
-              colors = ButtonDefaults.buttonColors(
-                containerColor = ThemeCyber.colors.torPurple,
-                contentColor = ThemeCyber.colors.backgroundDarker,
-              ),
-              shape = RoundedCornerShape(6.dp),
-              modifier = Modifier
-                .weight(1f)
-                .height(38.dp)
-                .testTag("circuit_start_tor_button")
-            ) {
-              Icon(
-                imageVector = Icons.Default.VpnKey,
-                contentDescription = null,
-                modifier = Modifier.size(15.dp),
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              Text(
-                text = "CONNECT TOR",
-                fontFamily = CyberMonoFamily,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-              )
-            }
-          }
-
-          if (isOrbotInstalled && onLaunchOrbot != null) {
-            OutlinedButton(
-              onClick = onLaunchOrbot,
-              shape = RoundedCornerShape(6.dp),
-              colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = ThemeCyber.colors.primary,
-              ),
-              border = androidx.compose.foundation.BorderStroke(1.dp, ThemeCyber.colors.primary),
-              modifier = Modifier
-                .weight(1f)
-                .height(38.dp)
-                .testTag("circuit_launch_orbot_button")
-            ) {
-              Text(
-                text = "ORBOT",
-                fontFamily = CyberMonoFamily,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-              )
-            }
-          }
-
-          if (onCheckTorProject != null && torState is TorManager.TorState.READY) {
-            OutlinedButton(
-              onClick = onCheckTorProject,
-              shape = RoundedCornerShape(6.dp),
-              colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = ThemeCyber.colors.torPurple,
-              ),
-              border = androidx.compose.foundation.BorderStroke(1.dp, ThemeCyber.colors.torPurple),
-              modifier = Modifier
-                .weight(1f)
-                .height(38.dp)
-                .testTag("circuit_verify_tor_button")
-            ) {
-              Icon(
-                imageVector = Icons.Default.Language,
-                contentDescription = null,
-                modifier = Modifier.size(15.dp),
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              Text(
-                text = "TOR CHECK",
-                fontFamily = CyberMonoFamily,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-              )
-            }
-          }
-        }
       }
     }
 
-    Spacer(modifier = Modifier.height(20.dp))
+    Spacer(modifier = Modifier.height(14.dp))
 
+    // 3-Hop Circuit Visualizer Nodes
     Text(
-      text = "3-HOP ENCRYPTED ONION ROUTE",
-      color = ThemeCyber.colors.textMuted,
+      text = "CIRCUIT HOPS",
+      color = ThemeCyber.colors.textSecondary,
       fontFamily = CyberMonoFamily,
       fontSize = 11.sp,
       fontWeight = FontWeight.Bold,
     )
 
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(8.dp))
 
-    if (circuit != null && torState is TorManager.TorState.READY) {
-      // Hop 0: Device Client
-      CircuitNodeCard(
-        hopTitle = "ORIGIN // LOCAL CLIENT",
-        nodeName = "Remmi Android Client",
-        ip = "127.0.0.1 (Isolated)",
-        country = "Local Isolated Sandbox",
-        latency = 0,
-        color = ThemeCyber.colors.primary,
-        isExit = false,
-      )
+    Card(
+      colors = CardDefaults.cardColors(containerColor = ThemeCyber.colors.surface),
+      shape = RoundedCornerShape(8.dp),
+      modifier = Modifier.fillMaxWidth()
+    ) {
+      Column(modifier = Modifier.padding(14.dp)) {
+        // Node 1: Entry Guard
+        CircuitNodeRow(
+          stepNumber = "01",
+          nodeType = "ENTRY GUARD",
+          nodeDesc = circuit?.guardNodeSummary ?: if (CurrentTorRoute.isReady) "Encrypted Entry Relay" else "Offline",
+          icon = Icons.Default.Shield,
+          isActive = CurrentTorRoute.isReady,
+          tint = ThemeCyber.colors.primary,
+        )
 
-      CircuitConnectorLine()
+        Spacer(modifier = Modifier.height(10.dp))
+        Box(
+          modifier = Modifier
+            .padding(start = 15.dp)
+            .width(2.dp)
+            .height(16.dp)
+            .background(if (CurrentTorRoute.isReady) ThemeCyber.colors.torPurple else ThemeCyber.colors.surfaceBorder)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
 
-      // Hop 1: Guard Node
-      CircuitNodeCard(
-        hopTitle = "HOP 1 // GUARD (ENTRY)",
-        nodeName = circuit.guardNodeSummary ?: "Verified Tor Guard",
-        ip = "Encrypted Onion Ingress",
-        country = "Onion Network",
-        latency = 0,
-        color = ThemeCyber.colors.warningYellow,
-        isExit = false,
-      )
+        // Node 2: Middle Relay
+        CircuitNodeRow(
+          stepNumber = "02",
+          nodeType = "MIDDLE RELAY",
+          nodeDesc = circuit?.middleNodeSummary ?: if (CurrentTorRoute.isReady) "Zero-Knowledge Relay" else "Offline",
+          icon = Icons.Default.Lock,
+          isActive = CurrentTorRoute.isReady,
+          tint = ThemeCyber.colors.torPurple,
+        )
 
-      CircuitConnectorLine()
+        Spacer(modifier = Modifier.height(10.dp))
+        Box(
+          modifier = Modifier
+            .padding(start = 15.dp)
+            .width(2.dp)
+            .height(16.dp)
+            .background(if (CurrentTorRoute.isReady) ThemeCyber.colors.torPurple else ThemeCyber.colors.surfaceBorder)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
 
-      // Hop 2: Middle Relay
-      CircuitNodeCard(
-        hopTitle = "HOP 2 // MIDDLE RELAY",
-        nodeName = circuit.middleNodeSummary ?: "Zero-Knowledge Onion Relay",
-        ip = "Encrypted Inner Tunnel",
-        country = "Onion Network",
-        latency = 0,
-        color = ThemeCyber.colors.torPurple,
-        isExit = false,
-      )
+        // Node 3: Exit Relay
+        CircuitNodeRow(
+          stepNumber = "03",
+          nodeType = "EXIT RELAY",
+          nodeDesc = circuit?.exitNodeSummary ?: if (CurrentTorRoute.isReady) "Verified Tor Exit (${circuit?.verifiedExitIp ?: "Protected"})" else "Offline",
+          icon = Icons.Default.Language,
+          isActive = CurrentTorRoute.isReady,
+          tint = ThemeCyber.colors.successGreen,
+        )
+      }
+    }
 
-      CircuitConnectorLine()
+    Spacer(modifier = Modifier.height(16.dp))
 
-      // Hop 3: Exit Node
-      val exitIp = circuit.verifiedExitIp ?: "Protected Tor Exit"
-      CircuitNodeCard(
-        hopTitle = "HOP 3 // EXIT RELAY",
-        nodeName = circuit.exitNodeSummary ?: "Verified Tor Exit",
-        ip = exitIp,
-        country = if (circuit.isVerifiedTor) "Verified by check.torproject.org" else "Tor Exit Node",
-        latency = circuit.latencyMs,
-        color = ThemeCyber.colors.successGreen,
-        isExit = true,
-      )
-    } else {
-      Box(
+    // Action Buttons
+    if (CurrentTorRoute.isReady) {
+      Button(
+        onClick = onRotateCircuit,
         modifier = Modifier
           .fillMaxWidth()
-          .clip(RoundedCornerShape(8.dp))
-          .background(ThemeCyber.colors.surface)
-          .padding(24.dp),
-        contentAlignment = Alignment.Center,
+          .testTag("rotate_circuit_button"),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = ThemeCyber.colors.torPurple,
+          contentColor = Color.White,
+        ),
+        shape = RoundedCornerShape(8.dp),
       ) {
+        Icon(
+          imageVector = Icons.Default.Autorenew,
+          contentDescription = null,
+          modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
-          text = if (torState.isConnecting) "TOR IS CURRENTLY BOOTSTRAPPING..." else "TOR CIRCUIT IS CURRENTLY OFFLINE.\nSWITCH TO GHOST MODE OR TAP CONNECT.",
-          color = ThemeCyber.colors.textMuted,
+          text = "NEW IDENTITY (ROTATE CIRCUIT)",
+          fontFamily = CyberMonoFamily,
+          fontSize = 12.sp,
+          fontWeight = FontWeight.Bold,
+        )
+      }
+
+      Spacer(modifier = Modifier.height(8.dp))
+
+      if (onCheckTorProject != null) {
+        OutlinedButton(
+          onClick = onCheckTorProject,
+          modifier = Modifier.fillMaxWidth(),
+          colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = ThemeCyber.colors.primary,
+          ),
+          shape = RoundedCornerShape(8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Default.CheckCircle,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = "VERIFY ON CHECK.TORPROJECT.ORG",
+            fontFamily = CyberMonoFamily,
+            fontSize = 12.sp,
+          )
+        }
+      }
+    } else if (onStartTor != null && torState !is TorManager.TorState.STOPPING && !torState.isConnecting) {
+      Button(
+        onClick = onStartTor,
+        modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = ThemeCyber.colors.primary,
+          contentColor = Color.Black,
+        ),
+        shape = RoundedCornerShape(8.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Default.VpnKey,
+          contentDescription = null,
+          modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+          text = if (torState is TorManager.TorState.FAILED) "RETRY GHOST MODE" else "ACTIVATE GHOST MODE",
           fontFamily = CyberMonoFamily,
           fontSize = 12.sp,
           fontWeight = FontWeight.Bold,
         )
       }
     }
+
+    if (!isOrbotInstalled && onLaunchOrbot != null) {
+      Spacer(modifier = Modifier.height(8.dp))
+      OutlinedButton(
+        onClick = onLaunchOrbot,
+        modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.outlinedButtonColors(
+          contentColor = ThemeCyber.colors.textSecondary,
+        ),
+        shape = RoundedCornerShape(8.dp),
+      ) {
+        Text(
+          text = "GET ORBOT (STANDALONE TOR)",
+          fontFamily = CyberMonoFamily,
+          fontSize = 11.sp,
+        )
+      }
+    }
   }
 }
 
-
 @Composable
-private fun CircuitConnectorLine() {
-  Column(
-    modifier = Modifier
-      .fillMaxWidth()
-      .padding(start = 24.dp),
-    horizontalAlignment = Alignment.Start,
-  ) {
-    Box(
-      modifier = Modifier
-        .width(2.dp)
-        .height(16.dp)
-        .background(ThemeCyber.colors.surfaceBorder)
-    )
-  }
-}
-
-@Composable
-private fun CircuitNodeCard(
-  hopTitle: String,
-  nodeName: String,
-  ip: String,
-  country: String,
-  latency: Long,
-  color: Color,
-  isExit: Boolean,
+private fun CircuitNodeRow(
+  stepNumber: String,
+  nodeType: String,
+  nodeDesc: String,
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  isActive: Boolean,
+  tint: Color,
 ) {
   Row(
-    modifier = Modifier
-      .fillMaxWidth()
-      .clip(RoundedCornerShape(8.dp))
-      .background(ThemeCyber.colors.surface)
-      .border(0.8.dp, color.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-      .padding(12.dp),
+    modifier = Modifier.fillMaxWidth(),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Box(
       modifier = Modifier
-        .size(24.dp)
+        .size(32.dp)
         .clip(CircleShape)
-        .background(color.copy(alpha = 0.15f))
-        .border(1.dp, color, CircleShape),
+        .background(if (isActive) tint.copy(alpha = 0.2f) else ThemeCyber.colors.surfaceLight)
+        .border(1.dp, if (isActive) tint else ThemeCyber.colors.surfaceBorder, CircleShape),
       contentAlignment = Alignment.Center,
     ) {
       Icon(
-        imageVector = if (isExit) Icons.Default.Lock else Icons.Default.Shield,
+        imageVector = icon,
         contentDescription = null,
-        tint = color,
-        modifier = Modifier.size(13.dp),
+        tint = if (isActive) tint else ThemeCyber.colors.textMuted,
+        modifier = Modifier.size(16.dp),
       )
     }
 
     Spacer(modifier = Modifier.width(12.dp))
 
-    Column(modifier = Modifier.weight(1f)) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-      ) {
+    Column {
+      Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-          text = hopTitle,
-          color = color,
+          text = "$stepNumber // $nodeType",
+          color = if (isActive) tint else ThemeCyber.colors.textMuted,
           fontFamily = CyberMonoFamily,
-          fontSize = 9.sp,
+          fontSize = 10.sp,
           fontWeight = FontWeight.Bold,
         )
-        if (latency > 0) {
-          Text(
-            text = "${latency}ms",
-            color = ThemeCyber.colors.textMuted,
-            fontFamily = CyberMonoFamily,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-          )
-        }
       }
-
-      Spacer(modifier = Modifier.height(2.dp))
-
       Text(
-        text = nodeName,
-        color = ThemeCyber.colors.textPrimary,
+        text = nodeDesc,
+        color = if (isActive) ThemeCyber.colors.textPrimary else ThemeCyber.colors.textMuted,
         fontFamily = CyberMonoFamily,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.SemiBold,
-      )
-
-      Spacer(modifier = Modifier.height(1.dp))
-
-      Text(
-        text = "$ip • $country",
-        color = ThemeCyber.colors.textSecondary,
-        fontFamily = CyberMonoFamily,
-        fontSize = 10.sp,
+        fontSize = 11.sp,
       )
     }
   }

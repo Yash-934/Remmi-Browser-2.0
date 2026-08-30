@@ -34,7 +34,7 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
     )
   }
 
-  suspend fun getPreferences(keys: List<String>): Map<String, Any?> = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+  suspend fun getPreferences(keys: List<String>): Result<Map<String, Any?>> = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
     mainHandler.post {
       try {
         NativePrefCtrl.getGeckoPrefs(keys.toMutableList()).accept(
@@ -44,17 +44,67 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
               result?.forEach { pref ->
                 map[pref.pref] = pref.value
               }
-              cont.resume(map)
+              cont.resume(Result.success(map))
             }
           },
           { error ->
+            val ex = IllegalStateException(error?.message ?: "Unknown getGeckoPrefs error")
             Log.e(TAG, "getGeckoPrefs error: ${error?.message}")
-            if (cont.isActive) cont.resume(emptyMap())
+            if (cont.isActive) cont.resume(Result.failure(ex))
           }
         )
       } catch (t: Throwable) {
         Log.e(TAG, "getGeckoPrefs exception: ${t.message}", t)
-        if (cont.isActive) cont.resume(emptyMap())
+        if (cont.isActive) cont.resume(Result.failure(t))
+      }
+    }
+  }
+
+  suspend fun applyCriticalPreference(
+    name: String,
+    value: Any,
+    branch: Int = PREF_BRANCH_USER
+  ): Boolean = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+    val setter: SetGeckoPreference<*> = when (value) {
+      is String -> SetGeckoPreference.setStringPref(name, value, branch)
+      is Int -> SetGeckoPreference.setIntPref(name, value, branch)
+      is Boolean -> SetGeckoPreference.setBoolPref(name, value, branch)
+      else -> {
+        DebugLogManager.log(
+          "[GECKO_PHASE_A] UNSUPPORTED_TYPE key=$name type=${value::class.java.name}"
+        )
+        if (cont.isActive) cont.resume(false)
+        return@suspendCancellableCoroutine
+      }
+    }
+
+    mainHandler.post {
+      try {
+        DebugLogManager.log("[GECKO_PHASE_A_PREF_START] key=$name value=$value")
+        NativePrefCtrl.setGeckoPrefs(mutableListOf(setter)).accept(
+          { result ->
+            val success = result?.get(name) == true
+            DebugLogManager.log("[GECKO_PHASE_A_PREF_RESULT] key=$name success=$success")
+            if (cont.isActive) {
+              cont.resume(success)
+            }
+          },
+          { error ->
+            DebugLogManager.log(
+              "[GECKO_PHASE_A_PREF_ERROR] key=$name error=${error?.message ?: "unknown"}"
+            )
+            if (cont.isActive) {
+              cont.resume(false)
+            }
+          }
+        )
+      } catch (t: Throwable) {
+        DebugLogManager.log(
+          "[GECKO_PHASE_A_PREF_EXCEPTION] key=$name exception=${t.javaClass.name} message=${t.message}"
+        )
+        if (cont.isActive) {
+          cont.resume(false)
+        }
       }
     }
   }

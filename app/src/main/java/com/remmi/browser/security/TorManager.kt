@@ -13,10 +13,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import net.freehaven.tor.control.TorControlConnection
 import org.torproject.jni.TorService
 import java.io.File
@@ -129,6 +131,9 @@ class TorManager(private val context: Context) {
   private var consecutiveStartFailures: Int = 0
   private val MAX_START_ATTEMPTS = 3
 
+  @Volatile
+  private var intentionalStop = false
+
   private val torStatusReceiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
       if (intent.action == TorService.ACTION_STATUS) {
@@ -148,6 +153,13 @@ class TorManager(private val context: Context) {
             _bootstrapState.value = TorState.STOPPING
           }
           TorService.STATUS_OFF -> {
+            if (intentionalStop) {
+              intentionalStop = false
+              _bootstrapState.value = TorState.OFF
+              _currentCircuit.value = null
+              return
+            }
+
             val prev = _bootstrapState.value
             if (prev is TorState.READY || prev.isConnecting) {
               DebugLogManager.log("WARNING: Tor service stopped unexpectedly while active (Fail-Closed enforced)")
@@ -286,9 +298,9 @@ class TorManager(private val context: Context) {
   /**
    * Starts native Tor foreground service with verified state progression:
    * OFF -> STARTING_SERVICE -> SERVICE_FOREGROUND_CONFIRMED -> TOR_BOOTSTRAPPING ->
-   * SOCKS_DISCOVERY -> SOCKS5_VERIFY -> REMOTE_TOR_VERIFY -> READY
+   * SOCKS_DISCOVERY -> SOCKS5_VERIFY -> REMOTE_TOR_VERIFY -> READY (Tor daemon + SOCKS + Tor exit verified)
    */
-  suspend fun startTor(): Result<Int> = withContext(Dispatchers.IO) {
+  suspend fun startTor(generation: Long = CurrentTorRoute.currentGeneration): Result<Int> = withContext(Dispatchers.IO) {
     startMutex.withLock {
       val currentState = _bootstrapState.value
       if (currentState is TorState.READY && TorStatusChecker.isPortListening("127.0.0.1", currentState.port, 400)) {
@@ -360,7 +372,10 @@ class TorManager(private val context: Context) {
         DebugLogManager.log("Step 5/6: Verifying Tor exit routing via SOCKS5 proxy on port $activePort...")
         delay(300)
 
-        val verifyResult = TorStatusChecker.verifyTorRouting(activePort, maxAttempts = 3)
+        val verifyResult = TorStatusChecker.verifyTorRouting(
+          socksPort = activePort,
+          currentGeneration = generation
+        )
 
         if (!verifyResult.isTor) {
           consecutiveStartFailures++
@@ -387,7 +402,7 @@ class TorManager(private val context: Context) {
         consecutiveStartFailures = 0 // Reset failures on successful READY
 
         RemmiTorService.updateStatus(context, "Ghost Mode Active • Encrypted Tor Routing (127.0.0.1:$activePort)")
-        DebugLogManager.log("Step 6/6: TOR_EXIT_VERIFIED on port $activePort (Exit IP: ${verifyResult.ip}) • Ready for Gecko proxy application")
+        DebugLogManager.log("Step 6/6: TOR_DAEMON_ROUTE_READY on port $activePort (Exit IP: ${verifyResult.ip}) • Ready for Gecko proxy application")
 
         Result.success(activePort)
       } catch (t: Throwable) {
@@ -401,8 +416,23 @@ class TorManager(private val context: Context) {
     }
   }
 
-  suspend fun refreshCircuit(): Result<TorCircuit> = withContext(Dispatchers.IO) {
+  suspend fun refreshCircuit(generation: Long = CurrentTorRoute.currentGeneration): Result<TorCircuit> = withContext(Dispatchers.IO) {
     startMutex.withLock {
+      if (_bootstrapState.value !is TorState.READY) {
+        return@withContext Result.failure(
+          IllegalStateException("Tor circuit rotation requires an already verified Tor circuit")
+        )
+      }
+
+      val circuit = _currentCircuit.value
+      if (circuit == null || !circuit.isVerifiedTor) {
+        return@withContext Result.failure(
+          IllegalStateException("No verified Tor circuit available for rotation")
+        )
+      }
+
+      val activeSocksPort = circuit.socksPort
+
       val now = System.currentTimeMillis()
       if (now - lastNewnymTimestamp < NEWNYM_COOLDOWN_MS) {
         val remainingSec = ((NEWNYM_COOLDOWN_MS - (now - lastNewnymTimestamp)) / 1000) + 1
@@ -413,8 +443,6 @@ class TorManager(private val context: Context) {
 
       _bootstrapState.value = TorState.TOR_BOOTSTRAPPING(50, "Rotating onion circuit (SIGNAL NEWNYM)...")
       DebugLogManager.log("Sending SIGNAL NEWNYM to Tor daemon...")
-
-      val activeSocksPort = _currentCircuit.value?.socksPort ?: discoverRuntimeSocksPort()
 
       var signaled = false
       val controlCandidates = listOf(9051, 9151)
@@ -433,7 +461,7 @@ class TorManager(private val context: Context) {
               }
               conn.signal("NEWNYM")
               signaled = true
-              DebugLogManager.log("SIGNAL NEWNYM sent successfully via TorControlConnection (port $cp)")
+              DebugLogManager.log("[CIRCUIT] NEWNYM_SENT successfully via TorControlConnection (port $cp)")
             }
             if (signaled) break
           } catch (e: Exception) {
@@ -443,11 +471,25 @@ class TorManager(private val context: Context) {
         }
       }
 
-      lastNewnymTimestamp = now
+      if (!signaled) {
+        val msg = "Unable to send SIGNAL NEWNYM to Tor control port"
+        DebugLogManager.log("ERROR: $msg")
+        _bootstrapState.value = TorState.FAILED(
+          TorErrorCategory.TOR_CONTROL_CONNECTION_FAILED,
+          msg
+        )
+        return@withContext Result.failure(IllegalStateException(msg))
+      }
+
+      // Record timestamp ONLY after successful signal
+      lastNewnymTimestamp = System.currentTimeMillis()
       delay(1200)
 
       _bootstrapState.value = TorState.REMOTE_TOR_VERIFY(activeSocksPort, 1)
-      val verifyResult = TorStatusChecker.verifyTorRouting(activeSocksPort, maxAttempts = 3)
+      val verifyResult = TorStatusChecker.verifyTorRouting(
+        socksPort = activeSocksPort,
+        currentGeneration = generation
+      )
       if (!verifyResult.isTor) {
         val failMsg = "Tor circuit rotation failed verification: ${verifyResult.message}"
         DebugLogManager.log("ERROR: $failMsg")
@@ -469,7 +511,8 @@ class TorManager(private val context: Context) {
 
       _currentCircuit.value = newCircuit
       _bootstrapState.value = TorState.READY(activeSocksPort, newCircuit)
-      DebugLogManager.log("New Tor circuit verified on port $activeSocksPort (Exit IP: ${verifyResult.ip})")
+      DebugLogManager.log("[CIRCUIT] TOR_ROUTE_VERIFIED port=$activeSocksPort")
+      DebugLogManager.log("[CIRCUIT] EXIT_IP=${verifyResult.ip}")
       Result.success(newCircuit)
     }
   }
@@ -494,20 +537,41 @@ class TorManager(private val context: Context) {
     return context.packageManager.getLaunchIntentForPackage("org.torproject.android")
   }
 
+  private suspend fun awaitTorStopped(timeoutMs: Long = 5000L): Boolean {
+    return try {
+      withTimeout(timeoutMs) {
+        bootstrapState.first { it is TorState.OFF }
+      }
+      true
+    } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+      false
+    }
+  }
+
   suspend fun stopTor() = withContext(Dispatchers.IO) {
     startMutex.withLock {
+      if (_bootstrapState.value is TorState.OFF) {
+        _currentCircuit.value = null
+        return@withLock
+      }
+
+      intentionalStop = true
+      _bootstrapState.value = TorState.STOPPING
+
       try {
         TorServiceLauncher.stop(context)
         DebugLogManager.log("Tor service stop requested")
       } catch (t: Throwable) {
-        Log.w(TAG, "Stop Tor service notice: ${t.message}")
+        Log.w(TAG, "Stop request failed", t)
       }
 
-      withContext(Dispatchers.Main) {
-        CurrentTorRoute.markShieldActive()
-        _bootstrapState.value = TorState.OFF
-        _currentCircuit.value = null
+      val stopped = awaitTorStopped(5000L)
+      if (!stopped) {
+        DebugLogManager.log("WARNING: Tor stop confirmation timed out")
       }
+
+      _currentCircuit.value = null
+      _bootstrapState.value = TorState.OFF
     }
   }
 

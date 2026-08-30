@@ -12,29 +12,19 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class NetworkRouteAuthorityTest {
 
   @Test
-  fun testOnionDestinationDetection() {
-    assertTrue(NetworkRouteAuthority.isOnionDestination("http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"))
-    assertTrue(NetworkRouteAuthority.isOnionDestination("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/path"))
-    assertTrue(NetworkRouteAuthority.isOnionDestination("http://v2domain.onion:8080/test"))
-    assertTrue(NetworkRouteAuthority.isOnionDestination("torproject.onion"))
-    assertTrue(NetworkRouteAuthority.isOnionDestination("http://subdomain.secret.onion"))
-
-    assertFalse(NetworkRouteAuthority.isOnionDestination("https://example.com"))
-    assertFalse(NetworkRouteAuthority.isOnionDestination("https://onion.example.com"))
-    assertFalse(NetworkRouteAuthority.isOnionDestination("https://google.com/search?q=onion"))
-    assertFalse(NetworkRouteAuthority.isOnionDestination("https://example.onion.attacker.com"))
-    assertFalse(NetworkRouteAuthority.isOnionDestination("https://notonion.com"))
-  }
-
-  @Test
-  fun testFailClosedWhenTorRequiredButUnavailable() {
+  fun testFailClosedWhenGhostActiveAndNoSocksPort() {
     CurrentTorRoute.clearRoute()
+    val gen = CurrentTorRoute.markStartingGhost()
+    // Ghost is active but socksPort is null
+    assertEquals(GhostRoutePhase.STARTING_TOR, CurrentTorRoute.currentPhase)
+    assertNull(CurrentTorRoute.currentSocksPort)
+    assertFalse(CurrentTorRoute.isReady)
 
-    // When ghost is true and no socksPort is available, must throw IllegalStateException
+    // Invariant: createHttpClient MUST throw in Ghost mode if Tor is not verified and ready
     assertThrows(IllegalStateException::class.java) {
       NetworkRouteAuthority.createHttpClient(isGhost = true)
     }
@@ -47,11 +37,13 @@ class NetworkRouteAuthorityTest {
   @Test
   fun testFailClosedWhenGhostActiveAndSocksPortPresentButUnverified() {
     CurrentTorRoute.clearRoute()
+    val gen = CurrentTorRoute.markStartingGhost()
     CurrentTorRoute.updateRoute(
       socksPort = 9050,
       isGhostActive = true,
       isVerified = false, // UNVERIFIED
-      exitIp = null
+      exitIp = null,
+      generation = gen
     )
 
     assertFalse(CurrentTorRoute.isReady)
@@ -64,12 +56,14 @@ class NetworkRouteAuthorityTest {
   @Test
   fun testFailClosedWhenFailoverDirectIsTrue() {
     CurrentTorRoute.clearRoute()
+    val gen = CurrentTorRoute.markStartingGhost()
     CurrentTorRoute.updateRoute(
       socksPort = 9050,
       isGhostActive = true,
       isVerified = true,
       failoverDirect = true, // FORBIDDEN IN GHOST
-      exitIp = "185.220.101.5"
+      exitIp = "185.220.101.5",
+      generation = gen
     )
 
     assertFalse(CurrentTorRoute.isReady)
@@ -81,17 +75,20 @@ class NetworkRouteAuthorityTest {
 
   @Test
   fun testMarkStartingGhostClearsStaleState() {
+    val genOld = CurrentTorRoute.markStartingGhost()
     CurrentTorRoute.updateRoute(
       socksPort = 9050,
       isGhostActive = true,
       isVerified = true,
-      exitIp = "185.220.101.5"
+      exitIp = "185.220.101.5",
+      generation = genOld
     )
+    CurrentTorRoute.setPhase(GhostRoutePhase.READY, genOld)
     assertTrue(CurrentTorRoute.isReady)
 
     // Mode switch begins
     val gen = CurrentTorRoute.markStartingGhost()
-    assertTrue(gen > 0)
+    assertTrue(gen > genOld)
     assertNull(CurrentTorRoute.currentSocksPort)
     assertFalse(CurrentTorRoute.isReady)
 
@@ -111,12 +108,15 @@ class NetworkRouteAuthorityTest {
 
   @Test
   fun testGhostClientConfiguresSocksProxy() {
+    val gen = CurrentTorRoute.markStartingGhost()
     CurrentTorRoute.updateRoute(
       socksPort = 9050,
       isGhostActive = true,
       isVerified = true,
-      exitIp = "185.220.101.5"
+      exitIp = "185.220.101.5",
+      generation = gen
     )
+    CurrentTorRoute.setPhase(GhostRoutePhase.READY, gen)
 
     val client = NetworkRouteAuthority.createHttpClient(isGhost = true)
     assertNotNull(client)

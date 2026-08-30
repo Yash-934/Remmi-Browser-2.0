@@ -25,6 +25,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.remmi.browser.security.CurrentTorRoute
+import com.remmi.browser.security.GhostRoutePhase
 import com.remmi.browser.security.PrivacyProfile
 import com.remmi.browser.security.TorManager
 import com.remmi.browser.ui.theme.CyberMonoFamily
@@ -61,19 +63,24 @@ fun HudOverlay(
         onClick = onShieldClick,
       )
 
-      // 2. Tor Circuit State metric
-      val (torLabel, torColor) = when (torState) {
-        is TorManager.TorState.OFF -> "CLEAN DIRECT" to ThemeCyber.colors.textSecondary
-        is TorManager.TorState.STARTING_SERVICE -> "STARTING 10%" to ThemeCyber.colors.warningYellow
-        is TorManager.TorState.SERVICE_FOREGROUND_CONFIRMED -> "SERVICE ACTIVE 20%" to ThemeCyber.colors.warningYellow
-        is TorManager.TorState.TOR_BOOTSTRAPPING -> "BOOTSTRAP ${torState.progress}%" to ThemeCyber.colors.warningYellow
-        is TorManager.TorState.TOR_CIRCUIT_ESTABLISHED -> "CIRCUIT OPEN 70%" to ThemeCyber.colors.torPurple
-        is TorManager.TorState.SOCKS_DISCOVERY -> "SOCKS DISCOVER 80%" to ThemeCyber.colors.torPurple
-        is TorManager.TorState.SOCKS5_VERIFY -> "SOCKS5 VERIFY 85%" to ThemeCyber.colors.torPurple
-        is TorManager.TorState.REMOTE_TOR_VERIFY -> "VERIFYING ROUTING" to ThemeCyber.colors.torPurple
-        is TorManager.TorState.READY -> "ONION ROUTED" to ThemeCyber.colors.successGreen
-        is TorManager.TorState.FAILED -> "TOR BLOCKED" to ThemeCyber.colors.dangerRed
-        is TorManager.TorState.STOPPING -> "STOPPING" to ThemeCyber.colors.textMuted
+      // 2. Truthful Phase-Aware Tor Circuit State metric
+      val routePhase = CurrentTorRoute.currentPhase
+      val isLocked = (torState as? TorManager.TorState.FAILED)?.category == com.remmi.browser.security.TorErrorCategory.TOR_SERVICE_START_FAILED &&
+          (torState as? TorManager.TorState.FAILED)?.message?.contains("Reset required") == true
+
+      val (torLabel, torColor) = when {
+        isLocked -> "TOR LOCKED (RETRY)" to ThemeCyber.colors.dangerRed
+        routePhase == GhostRoutePhase.ROTATING -> "ROTATING CIRCUIT" to ThemeCyber.colors.torPurple
+        routePhase == GhostRoutePhase.STARTING_TOR -> "STARTING TOR" to ThemeCyber.colors.warningYellow
+        routePhase == GhostRoutePhase.VERIFYING_TOR -> "VERIFYING TOR" to ThemeCyber.colors.warningYellow
+        routePhase == GhostRoutePhase.APPLYING_GECKO -> "APPLYING PROXY" to ThemeCyber.colors.torPurple
+        routePhase == GhostRoutePhase.VERIFYING_GECKO -> "VERIFYING ROUTE" to ThemeCyber.colors.torPurple
+        routePhase == GhostRoutePhase.READY && CurrentTorRoute.isReady -> "GHOST READY" to ThemeCyber.colors.successGreen
+        torState is TorManager.TorState.OFF -> "CLEAN DIRECT" to ThemeCyber.colors.textSecondary
+        torState is TorManager.TorState.FAILED -> "TOR BLOCKED" to ThemeCyber.colors.dangerRed
+        torState is TorManager.TorState.STOPPING -> "STOPPING" to ThemeCyber.colors.textMuted
+        torState is TorManager.TorState.READY && !CurrentTorRoute.isReady -> "VERIFYING ROUTE" to ThemeCyber.colors.torPurple
+        else -> "CONNECTING..." to ThemeCyber.colors.warningYellow
       }
 
       Row(
@@ -139,18 +146,18 @@ fun HudOverlay(
 }
 
 @Composable
-fun HudMetric(
+private fun HudMetric(
   label: String,
   value: String,
   color: Color,
-  onClick: () -> Unit = {},
+  onClick: () -> Unit,
 ) {
   Column(
-    horizontalAlignment = Alignment.Start,
     modifier = Modifier
       .clip(RoundedCornerShape(4.dp))
       .clickable { onClick() }
-      .padding(horizontal = 4.dp, vertical = 2.dp)
+      .padding(horizontal = 4.dp, vertical = 2.dp),
+    horizontalAlignment = Alignment.Start,
   ) {
     Text(
       text = label,
@@ -158,10 +165,7 @@ fun HudMetric(
       fontFamily = CyberMonoFamily,
       color = ThemeCyber.colors.textMuted,
       fontWeight = FontWeight.Bold,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis
     )
-    Spacer(modifier = Modifier.height(1.dp))
     Text(
       text = value,
       fontSize = 9.sp,

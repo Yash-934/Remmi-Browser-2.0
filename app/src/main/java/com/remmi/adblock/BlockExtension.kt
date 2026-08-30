@@ -102,65 +102,149 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
   private val extensionScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
 
+  private fun parseMessage(message: Any): JSONObject? {
+    return try {
+      when (message) {
+        is JSONObject -> message
+        is String -> JSONObject(message)
+        is Map<*, *> -> JSONObject(message)
+        else -> null
+      }
+    } catch (t: Throwable) {
+      Log.e(
+        TAG,
+        "[WEBEXT_PROTOCOL_PARSE_ERROR] ${t.javaClass.name}: ${t.message}"
+      )
+      null
+    }
+  }
+
   override fun onMessage(
     nativeApp: String,
     message: Any,
     sender: WebExtension.MessageSender
   ): org.mozilla.geckoview.GeckoResult<Any>? {
     if (nativeApp != "remmi_engine_extension") {
-      Log.w(TAG, "[WEBEXT_REJECTED] Unknown nativeApp=$nativeApp sender=${sender.webExtension.id}")
-      return org.mozilla.geckoview.GeckoResult.fromValue(JSONObject().apply { put("error", "unauthorized_app") })
-    }
-
-    val messageJson = when (message) {
-      is JSONObject -> message
-      is Map<*, *> -> try { JSONObject(message) } catch (_: Exception) { null }
-      is String -> try { JSONObject(message) } catch (_: Exception) { null }
-      else -> null
-    }
-
-    val type = messageJson?.optString("type") ?: ""
-    Log.d(TAG, "[WEBEXT_NATIVE_IN] app=$nativeApp type=$type messageClass=${message.javaClass.simpleName} env=${sender.environmentType}")
-
-    if (type == "SHOULD_BLOCK") {
-      val url = messageJson?.optString("url") ?: ""
-      val sourceUrl = messageJson?.optString("sourceUrl") ?: ""
-      val resourceType = messageJson?.optString("resourceType") ?: "other"
-
-      Log.d(TAG, "[WEBEXT_NATIVE_DECISION_START] resourceType=$resourceType urlLen=${url.length}")
-      val result = org.mozilla.geckoview.GeckoResult<Any>()
-
-      extensionScope.launch {
-        try {
-          val sourceHost = try {
-            if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
-          } catch (_: Exception) { null }
-          val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
-
-          val blocked = if (bypass) false else adblockBridge.shouldBlock(url, sourceUrl, resourceType)
-          Log.d(TAG, "[WEBEXT_NATIVE_DECISION_END] resourceType=$resourceType blocked=$blocked bypass=$bypass")
-          val responseObj = JSONObject().apply { put("cancel", blocked) }
-          result.complete(responseObj)
-          Log.d(TAG, "[WEBEXT_NATIVE_COMPLETE] resourceType=$resourceType")
-        } catch (t: Throwable) {
-          Log.e(TAG, "[WEBEXT_NATIVE_EXCEPTION] type=$resourceType error=${t.javaClass.name}: ${t.message}", t)
-          val fallbackObj = JSONObject().apply {
-            put("cancel", false)
-            put("error", true)
-          }
-          result.complete(fallbackObj)
+      Log.w(TAG, "[WEBEXT_REJECTED] nativeApp=$nativeApp sender=${sender.webExtension.id}")
+      return org.mozilla.geckoview.GeckoResult.fromValue(
+        JSONObject().apply {
+          put("ok", false)
+          put("error", "unauthorized_app")
         }
-      }
-      return result
+      )
     }
 
-    // Always respond with a valid completed GeckoResult for any other message
-    return org.mozilla.geckoview.GeckoResult.fromValue(
-      JSONObject().apply {
-        put("received", true)
-        put("type", type)
-      }
+    val messageJson = parseMessage(message)
+    if (messageJson == null) {
+      Log.e(TAG, "[WEBEXT_PROTOCOL_ERROR] invalid_message")
+      return org.mozilla.geckoview.GeckoResult.fromValue(
+        JSONObject().apply {
+          put("ok", false)
+          put("error", "invalid_message")
+        }
+      )
+    }
+
+    val type = messageJson.optString("type")
+    Log.d(
+      TAG,
+      "[WEBEXT_NATIVE_IN] type=$type class=${message.javaClass.simpleName}"
     )
+
+    if (type == "PING") {
+      Log.d(TAG, "[WEBEXT_NATIVE_COMPLETE] type=PING")
+      return org.mozilla.geckoview.GeckoResult.fromValue(
+        JSONObject().apply {
+          put("ok", true)
+          put("pong", true)
+        }
+      )
+    }
+
+    if (type != "SHOULD_BLOCK") {
+      Log.w(TAG, "[WEBEXT_UNSUPPORTED_TYPE] type=$type")
+      return org.mozilla.geckoview.GeckoResult.fromValue(
+        JSONObject().apply {
+          put("ok", false)
+          put("error", "unsupported_type")
+          put("type", type)
+        }
+      )
+    }
+
+    val url = messageJson.optString("url")
+    val sourceUrl = messageJson.optString("sourceUrl")
+    val resourceType = messageJson.optString("resourceType", "other")
+
+    if (url.isBlank()) {
+      Log.e(TAG, "[WEBEXT_PROTOCOL_ERROR] empty_url")
+      return org.mozilla.geckoview.GeckoResult.fromValue(
+        JSONObject().apply {
+          put("ok", false)
+          put("error", "empty_url")
+          put("cancel", false)
+        }
+      )
+    }
+
+    val result = org.mozilla.geckoview.GeckoResult<Any>()
+
+    extensionScope.launch {
+      try {
+        Log.d(
+          TAG,
+          "[WEBEXT_NATIVE_DECISION_START] type=$resourceType urlLen=${url.length}"
+        )
+
+        val sourceHost = try {
+          if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
+        } catch (_: Exception) { null }
+        val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+
+        val blocked = if (bypass) {
+          false
+        } else {
+          adblockBridge.shouldBlock(
+            url = url,
+            sourceUrl = sourceUrl,
+            resourceType = resourceType
+          )
+        }
+
+        Log.d(
+          TAG,
+          "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=$blocked bypass=$bypass"
+        )
+
+        result.complete(
+          JSONObject().apply {
+            put("ok", true)
+            put("cancel", blocked)
+          }
+        )
+
+        Log.d(
+          TAG,
+          "[WEBEXT_NATIVE_COMPLETE] type=$resourceType"
+        )
+      } catch (t: Throwable) {
+        Log.e(
+          TAG,
+          "[WEBEXT_NATIVE_EXCEPTION] type=$resourceType error=${t.javaClass.name}: ${t.message}",
+          t
+        )
+
+        result.complete(
+          JSONObject().apply {
+            put("ok", false)
+            put("error", "native_exception")
+            put("cancel", false)
+          }
+        )
+      }
+    }
+
+    return result
   }
 
   override fun onConnect(port: WebExtension.Port) {

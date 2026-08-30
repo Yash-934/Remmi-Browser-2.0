@@ -44,6 +44,30 @@ class AdblockBridge {
     }
 
     loadDefaultTrackerRules()
+
+    if (isNativeLoaded) {
+      selfTest()
+    }
+  }
+
+  fun selfTest(): Boolean {
+    if (!isNativeLoaded) {
+      Log.d(TAG, "[ADBLOCK_SELF_TEST] native not loaded (using Kotlin fallback)")
+      return false
+    }
+
+    return try {
+      val result = nativeMatches(
+        "https://example.com/test.js",
+        "https://example.com/",
+        "script"
+      )
+      Log.d(TAG, "[ADBLOCK_SELF_TEST] result=$result")
+      true
+    } catch (t: Throwable) {
+      Log.e(TAG, "[ADBLOCK_SELF_TEST] failed", t)
+      false
+    }
   }
 
   fun loadDefaultTrackerRules() {
@@ -157,29 +181,37 @@ class AdblockBridge {
   }
 
   fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean {
-    if (isNativeLoaded) {
-      try {
-        val blocked = nativeMatches(url, sourceUrl, resourceType)
-        if (blocked) {
-          totalBlockedCount.incrementAndGet()
-          return true
-        }
-      } catch (e: Throwable) {
-        Log.e(TAG, "Native check URL failed, checking fallback rules", e)
-      }
-    }
-
+    val startNs = System.nanoTime()
     try {
+      if (isNativeLoaded) {
+        try {
+          val blocked = nativeMatches(url, sourceUrl, resourceType)
+          if (blocked) {
+            totalBlockedCount.incrementAndGet()
+            logSlowDecisionIfNeeded(startNs, resourceType)
+            return true
+          }
+        } catch (e: Throwable) {
+          Log.e(TAG, "[ADBLOCK_NATIVE_MATCH_ERROR] nativeMatches failed for url=$url type=$resourceType", e)
+          throw e
+        }
+      }
+
       val uri = URI(url)
-      val host = uri.host?.lowercase() ?: return false
+      val host = uri.host?.lowercase() ?: run {
+        logSlowDecisionIfNeeded(startNs, resourceType)
+        return false
+      }
 
       if (allowList.any { rule -> host == rule || host.endsWith(".$rule") }) {
+        logSlowDecisionIfNeeded(startNs, resourceType)
         return false
       }
 
       for (blockedHost in blockedHostnames) {
         if (host == blockedHost || host.endsWith(".$blockedHost")) {
           totalBlockedCount.incrementAndGet()
+          logSlowDecisionIfNeeded(startNs, resourceType)
           return true
         }
       }
@@ -188,13 +220,23 @@ class AdblockBridge {
       for (pattern in blockedSubstrings) {
         if (lowerUrl.contains(pattern)) {
           totalBlockedCount.incrementAndGet()
+          logSlowDecisionIfNeeded(startNs, resourceType)
           return true
         }
       }
 
+      logSlowDecisionIfNeeded(startNs, resourceType)
       return false
     } catch (e: Exception) {
-      return false
+      Log.e(TAG, "[ADBLOCK_MATCH_ERROR] shouldBlock failed for url=$url", e)
+      throw e
+    }
+  }
+
+  private fun logSlowDecisionIfNeeded(startNs: Long, resourceType: String) {
+    val elapsedUs = (System.nanoTime() - startNs) / 1_000
+    if (elapsedUs > 10_000) {
+      Log.w(TAG, "Slow adblock decision: ${elapsedUs}us type=$resourceType")
     }
   }
 

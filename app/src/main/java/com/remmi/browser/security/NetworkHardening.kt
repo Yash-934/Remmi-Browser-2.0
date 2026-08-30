@@ -35,11 +35,15 @@ object NetworkHardening {
       "network.proxy.socks" to "127.0.0.1",
       "network.proxy.socks_port" to torPort,
       "network.proxy.socks_version" to 5,
-      "network.proxy.socks_remote_dns" to true,
       "network.proxy.socks5_remote_dns" to true,
+      "network.proxy.socks_remote_dns" to true,
       "network.proxy.failover_direct" to false, // CRITICAL: zero clearnet leak
       "network.proxy.allow_bypass" to false,
       "network.proxy.no_proxies_on" to "",
+      "network.proxy.system_wpad" to false,
+      "network.proxy.system_wpad.allowed" to false,
+      "network.proxy.retry_failed_proxies" to false,
+      "network.proxy.detect_system_proxy_changes" to false,
     )
   }
 
@@ -156,6 +160,36 @@ object NetworkHardening {
     )
   }
 
+  private fun validateMandatoryRoutingReadback(
+    readBack: Map<String, Any?>,
+    expectedPort: Int
+  ): List<String> {
+    val failures = mutableListOf<String>()
+
+    fun requirePref(key: String, expected: Any?) {
+      val actual = readBack[key]
+      if (actual != expected) {
+        failures.add("$key expected=$expected actual=$actual")
+      }
+    }
+
+    requirePref("network.proxy.type", 1)
+    requirePref("network.proxy.socks", "127.0.0.1")
+    requirePref("network.proxy.socks_port", expectedPort)
+    requirePref("network.proxy.socks_version", 5)
+    requirePref("network.proxy.socks5_remote_dns", true)
+    requirePref("network.proxy.socks_remote_dns", true)
+    requirePref("network.proxy.failover_direct", false)
+    requirePref("network.proxy.allow_bypass", false)
+    requirePref("network.proxy.no_proxies_on", "")
+    requirePref("network.proxy.system_wpad", false)
+    requirePref("network.proxy.system_wpad.allowed", false)
+    requirePref("network.proxy.retry_failed_proxies", false)
+    requirePref("network.proxy.detect_system_proxy_changes", false)
+
+    return failures
+  }
+
   suspend fun applyTorNetworkSettings(
     runtime: GeckoRuntime?,
     port: Int? = CurrentTorRoute.currentSocksPort,
@@ -184,53 +218,79 @@ object NetworkHardening {
 
     val prefController = GeckoPreferenceController(runtime)
 
-    // Phase A: Mandatory Tor SOCKS5 routing preferences (FAIL-CLOSED)
-    val routingPrefs = getMandatoryTorRoutingPreferences(port)
-    val routingApplied = prefController.applyPreferences(routingPrefs, GeckoPreferenceController.PREF_BRANCH_USER)
-    if (!routingApplied) {
-      Log.e(TAG, "Critical Phase A (Mandatory Tor SOCKS5 routing) failed to apply on port $port")
-      DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST reason=phase_a_routing_failed port=$port")
+    // Phase A: Mandatory Tor SOCKS5 routing preferences (FAIL-CLOSED) applied individually
+    val routingPrefs = listOf(
+      "network.proxy.type" to 1,
+      "network.proxy.socks" to "127.0.0.1",
+      "network.proxy.socks_port" to port,
+      "network.proxy.socks_version" to 5,
+      "network.proxy.socks5_remote_dns" to true,
+      "network.proxy.socks_remote_dns" to true,
+      "network.proxy.failover_direct" to false,
+      "network.proxy.allow_bypass" to false,
+      "network.proxy.no_proxies_on" to "",
+      "network.proxy.system_wpad" to false,
+      "network.proxy.system_wpad.allowed" to false,
+      "network.proxy.retry_failed_proxies" to false,
+      "network.proxy.detect_system_proxy_changes" to false
+    )
+
+    DebugLogManager.log("[ROUTE] PHASE_A_START count=${routingPrefs.size}")
+
+    val phaseAFailures = mutableListOf<String>()
+    for ((name, value) in routingPrefs) {
+      val success = prefController.applyCriticalPreference(
+        name = name,
+        value = value,
+        branch = GeckoPreferenceController.PREF_BRANCH_USER
+      )
+      if (!success) {
+        phaseAFailures.add(name)
+      }
+    }
+
+    if (phaseAFailures.isNotEmpty()) {
+      lastAppliedRouteKey = null
+      Log.e(TAG, "[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures")
+      DebugLogManager.log("[ROUTE] PHASE_A_FAILED port=$port failures=$phaseAFailures")
       return false
     }
-    DebugLogManager.log("[ROUTE] PHASE_A_ROUTING_APPLIED port=$port")
+
+    DebugLogManager.log("[ROUTE] PHASE_A_APPLIED port=$port count=${routingPrefs.size}")
+
+    // Immediate Mandatory Phase A Readback Verification
+    val phaseAVerifyKeys = routingPrefs.map { it.first }
+    val readBackResult = prefController.getPreferences(phaseAVerifyKeys)
+    if (readBackResult.isFailure) {
+      lastAppliedRouteKey = null
+      val err = readBackResult.exceptionOrNull()?.message ?: "readback_fetch_failed"
+      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_ERROR error=$err")
+      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_ERROR error=$err")
+      return false
+    }
+
+    val readBack = readBackResult.getOrThrow()
+    DebugLogManager.log("[ROUTE] PHASE_A_READBACK " + readBack.entries.joinToString { "${it.key}=${it.value}" })
+
+    val readBackFailures = validateMandatoryRoutingReadback(readBack, port)
+    if (readBackFailures.isNotEmpty()) {
+      lastAppliedRouteKey = null
+      Log.e(TAG, "[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures")
+      DebugLogManager.log("[ROUTE] PHASE_A_READBACK_FAILED failures=$readBackFailures")
+      return false
+    }
+
+    DebugLogManager.log("[ROUTE] PHASE_A_READBACK_OK port=$port")
 
     // Phase B: Hardened privacy & fingerprinting preferences
     val privacyPrefs = getHardenedPrivacyPreferences(settings)
     val privacyApplied = prefController.applyPreferences(privacyPrefs, GeckoPreferenceController.PREF_BRANCH_USER)
     if (!privacyApplied) {
-      Log.w(TAG, "Phase B (Privacy Hardening) reported some failed preferences; checking critical routing integrity")
+      Log.w(TAG, "Phase B (Privacy Hardening) reported some non-critical failed preferences")
     } else {
-      DebugLogManager.log("[ROUTE] PHASE_B_PRIVACY_APPLIED")
+      DebugLogManager.log("[ROUTE] PHASE_B_APPLIED")
     }
 
-    val verifyKeys = listOf(
-      "network.proxy.type",
-      "network.proxy.socks",
-      "network.proxy.socks_port",
-      "network.proxy.socks_version",
-      "network.proxy.socks_remote_dns",
-      "network.proxy.socks5_remote_dns",
-      "network.proxy.failover_direct",
-      "network.proxy.allow_bypass",
-      "network.proxy.no_proxies_on"
-    )
-    val readBack = prefController.getPreferences(verifyKeys)
-    val isReadbackValid = readBack["network.proxy.type"] == 1 &&
-      readBack["network.proxy.socks"] == "127.0.0.1" &&
-      readBack["network.proxy.socks_port"] == port &&
-      readBack["network.proxy.socks_version"] == 5 &&
-      readBack["network.proxy.socks5_remote_dns"] == true &&
-      readBack["network.proxy.failover_direct"] == false &&
-      readBack["network.proxy.allow_bypass"] == false &&
-      readBack["network.proxy.no_proxies_on"] == ""
-    
-    if (!isReadbackValid) {
-      Log.e(TAG, "Critical Ghost preferences readback failed! Expected proxy on $port but got: $readBack")
-      DebugLogManager.log("[ROUTE] gecko_proxy_failed profile=GHOST reason=readback_mismatch readback=$readBack")
-      return false
-    }
-
-    DebugLogManager.log("[ROUTE] GEOCKO_PREF_READBACK_OK")
     lastAppliedRouteKey = targetKey
     DebugLogManager.log("[ROUTE] NATIVE_GECKO_APPLIED profile=GHOST port=$port")
     return true

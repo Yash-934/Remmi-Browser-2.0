@@ -7,6 +7,7 @@ import com.remmi.browser.engine.TabManager
 import com.remmi.browser.util.DebugLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
@@ -23,7 +24,7 @@ import java.util.Scanner
 class PrivacyNetworkController private constructor(private val context: Context) {
   private val torManager = TorManager.getInstance(context)
   private val geckoEngine = GeckoEngineManager.getInstance(context)
-  private val transitionMutex = kotlinx.coroutines.sync.Mutex()
+  private val transitionMutex = Mutex()
 
   val torState: StateFlow<TorManager.TorState> = torManager.bootstrapState
   val currentCircuit: StateFlow<TorCircuit?> = torManager.currentCircuit
@@ -49,16 +50,104 @@ class PrivacyNetworkController private constructor(private val context: Context)
     DebugLogManager.log("[ROUTE] Tor failure state manually reset by user.")
   }
 
+  private suspend fun failGhostTransition(
+    generation: Long,
+    error: Throwable,
+    stage: String = "TOR_DAEMON"
+  ): Result<Int> {
+    DebugLogManager.log(
+      "[ROUTE] FAILED profile=GHOST generation=$generation stage=$stage reason=${error.message}"
+    )
+
+    CurrentTorRoute.clearRoute(generation)
+    NetworkHardening.resetAppliedState()
+
+    try {
+      torManager.stopTor()
+    } catch (t: Throwable) {
+      Log.w(TAG, "Tor cleanup failed after Ghost failure", t)
+    }
+
+    return Result.failure(error)
+  }
+
+  private suspend fun verifyGeckoTorRoute(timeoutMs: Long = 6000L): Boolean {
+    val runtime = geckoEngine.runtime ?: run {
+      DebugLogManager.log("[GECKO_ROUTE_VERIFY_FAILURE] stage=runtime reason=null_runtime")
+      return false
+    }
+
+    return try {
+      kotlinx.coroutines.withTimeout(timeoutMs) {
+        DebugLogManager.log("[GECKO_ROUTE_VERIFY_START]")
+        val executor = GeckoWebExecutor(runtime)
+        val request = WebRequest.Builder("https://check.torproject.org/api/ip").build()
+        val response = executor.fetch(request).poll(timeoutMs)
+
+        if (response == null) {
+          DebugLogManager.log("[GECKO_ROUTE_VERIFY_FAILURE] stage=fetch reason=null_response")
+          return@withTimeout false
+        }
+
+        DebugLogManager.log("[GECKO_ROUTE_VERIFY_HTTP] status=${response.statusCode}")
+        if (response.statusCode != 200) {
+          DebugLogManager.log("[GECKO_ROUTE_VERIFY_FAILURE] stage=http_status code=${response.statusCode}")
+          return@withTimeout false
+        }
+
+        val isTor = response.body?.use { stream ->
+          val content = Scanner(stream, "UTF-8").useDelimiter("\\A").run {
+            if (hasNext()) next() else ""
+          }
+          val containsTor = content.contains("\"IsTor\":true")
+          DebugLogManager.log("[GECKO_ROUTE_VERIFY_TOR] isTor=$containsTor")
+          containsTor
+        } ?: false
+
+        if (isTor) {
+          DebugLogManager.log("[GECKO_ROUTE_VERIFY_SUCCESS]")
+        } else {
+          DebugLogManager.log("[GECKO_ROUTE_VERIFY_FAILURE] stage=body_inspection reason=is_tor_false")
+        }
+        isTor
+      }
+    } catch (t: Throwable) {
+      DebugLogManager.log(
+        "[GECKO_ROUTE_VERIFY_FAILURE] stage=exception exception=${t.javaClass.simpleName} reason=${t.message}"
+      )
+      false
+    }
+  }
+
   /**
-   * Enters Ghost Mode transactionally with Fail-Closed guarantee:
-   * 1. Closes existing session to prevent clearnet leakage.
-   * 2. Starts native TorService, dynamically discovers active SOCKS port, and verifies SOCKS5 handshake & check.torproject.org exit routing.
-   * 3. Configures GeckoView native engine-level proxy, remote DNS, and WebRTC blocking.
-   * 4. Updates CurrentTorRoute single source of truth.
-   * 5. Returns success only if Tor exit routing and native Gecko proxy are verified.
+   * Enters Ghost Mode transactionally with deterministic generation progression:
+   * 1. Check admission (prevent overlapping transitions)
+   * 2. Increment generation and set STARTING_TOR phase
+   * 3. Terminate active clearnet tab session to prevent leakage
+   * 4. Start Tor daemon & verify SOCKS/Tor exit
+   * 5. Set APPLYING_GECKO and apply native GeckoView proxy settings
+   * 6. Set VERIFYING_GECKO and verify route via GeckoWebExecutor
+   * 7. Commit route generation to CurrentTorRoute & transition to READY
    */
   suspend fun enterGhostMode(tabId: String): Result<Int> = transitionMutex.withLock {
     withContext(Dispatchers.IO) {
+      val existingRoute = CurrentTorRoute.route.value
+
+      // If already fully ready and verified, return active port immediately
+      if (existingRoute.phase == GhostRoutePhase.READY && CurrentTorRoute.isReady) {
+        return@withContext Result.success(existingRoute.socksPort ?: 9050)
+      }
+
+      // Admission check: reject duplicate concurrent attempts if already in non-shield state
+      if (existingRoute.phase != GhostRoutePhase.SHIELD && existingRoute.phase != GhostRoutePhase.FAILED) {
+        DebugLogManager.log(
+          "[ROUTE] ADMISSION_REJECTED reason=transition_in_progress currentPhase=${existingRoute.phase}"
+        )
+        return@withContext Result.failure(
+          IllegalStateException("Ghost transition already in progress")
+        )
+      }
+
       if (torManager.isLockedOut()) {
         val errorMsg = "Maximum Tor start attempts exceeded. Reset required (tap RETRY to reset)."
         Log.w(TAG, "Ghost Mode admission rejected: $errorMsg")
@@ -66,92 +155,90 @@ class PrivacyNetworkController private constructor(private val context: Context)
         return@withContext Result.failure(IllegalStateException(errorMsg))
       }
 
+      // Clear any prior cached route key at the beginning of a fresh Ghost transition
+      NetworkHardening.resetAppliedState()
+
       Log.i(TAG, "Entering Ghost Mode for tab $tabId (enforcing fail-closed Tor routing)...")
       val generation = CurrentTorRoute.markStartingGhost()
       DebugLogManager.log("[ROUTE] REQUESTED profile=GHOST tabId=$tabId generation=$generation")
+      DebugLogManager.log("[ROUTE] PHASE=STARTING_TOR generation=$generation")
 
-    // Step 1: Terminate active clearnet session first
-    geckoEngine.closeSessionSafely(tabId)
+      // Step 1: Terminate active clearnet session first
+      geckoEngine.closeSessionSafely(tabId)
 
-    // Step 2: Bootstrap & verify Tor daemon (TorManager handles discovery, handshake & exit verification)
-    val torResult = torManager.startTor()
-    if (torResult.isFailure) {
-      val error = torResult.exceptionOrNull() ?: Exception("Tor failed to initialize")
-      Log.e(TAG, "Ghost Mode transition aborted: ${error.message}")
-      CurrentTorRoute.clearRoute()
-      NetworkHardening.resetAppliedState()
-      DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=${error.message}")
-      return@withContext Result.failure(error)
-    }
+      CurrentTorRoute.setPhase(GhostRoutePhase.STARTING_TOR, generation)
 
-    val socksPort = torResult.getOrNull() ?: run {
-      val discovered = torManager.discoverRuntimeSocksPort()
-      if (discovered <= 0) {
-        val err = IllegalStateException("SOCKS port discovery returned invalid port: $discovered")
-        CurrentTorRoute.clearRoute()
-        NetworkHardening.resetAppliedState()
-        DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=port_unavailable")
-        return@withContext Result.failure(err)
+      // Step 2: Bootstrap & verify Tor daemon
+      val torResult = torManager.startTor(generation)
+      if (torResult.isFailure) {
+        val error = torResult.exceptionOrNull() ?: IllegalStateException("Tor failed to initialize")
+        return@withContext failGhostTransition(generation, error, stage = "TOR_DAEMON")
       }
-      discovered
-    }
 
-    DebugLogManager.log("[ROUTE] SOCKS_VERIFIED port=$socksPort")
+      val socksPort = torResult.getOrNull() ?: run {
+        val discovered = torManager.discoverRuntimeSocksPort()
+        if (discovered <= 0) {
+          val err = IllegalStateException("SOCKS port discovery returned invalid port: $discovered")
+          return@withContext failGhostTransition(generation, err, stage = "SOCKS_DISCOVERY")
+        }
+        discovered
+      }
 
-    // Step 3: Apply hardened Tor preferences directly to native GeckoView engine
-    val proxyApplied = NetworkHardening.applyTorNetworkSettings(geckoEngine.runtime, socksPort, generation)
-    if (!proxyApplied) {
-      val err = IllegalStateException("Failed to apply Gecko native Tor proxy preferences")
-      torManager.stopTor()
-      CurrentTorRoute.clearRoute()
-      NetworkHardening.resetAppliedState()
-      DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=gecko_proxy_failed")
-      return@withContext Result.failure(err)
-    }
+      CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_TOR, generation)
+      DebugLogManager.log("[ROUTE] SOCKS_VERIFIED port=$socksPort generation=$generation")
 
-    // Step 4: Verify Gecko is actually using the expected route with fast 5s bound
-    val geckoVerified = try {
-      val executor = GeckoWebExecutor(geckoEngine.runtime!!)
-      val request = WebRequest.Builder("https://check.torproject.org/api/ip").build()
-      val response = executor.fetch(request).poll(5000)
-      if (response != null && response.statusCode == 200) {
-        val bodyStream = response.body
-        if (bodyStream != null) {
-          val content = Scanner(bodyStream, "UTF-8").useDelimiter("\\A").next()
-          bodyStream.close()
-          content.contains("\"IsTor\":true")
-        } else false
-      } else false
-    } catch (e: Exception) {
-      false
-    }
-    
-    if (!geckoVerified) {
-      val err = IllegalStateException("Gecko native Tor proxy verification failed (not routing through Tor)")
-      torManager.stopTor()
-      CurrentTorRoute.clearRoute()
-      NetworkHardening.resetAppliedState()
-      DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=gecko_verification_failed")
-      return@withContext Result.failure(err)
-    }
+      // Step 3: Apply hardened Tor preferences directly to native GeckoView engine
+      CurrentTorRoute.setPhase(GhostRoutePhase.APPLYING_GECKO, generation)
+      DebugLogManager.log("[ROUTE] PHASE=APPLYING_GECKO generation=$generation")
 
-    DebugLogManager.log("[ROUTE] GECKO_ROUTE_VERIFIED")
-    // Step 5: Advance route generation and update Single Source of Truth
-    CurrentTorRoute.updateRoute(
-      socksPort = socksPort,
-      isGhostActive = true,
-      isVerified = true,
-      exitIp = torManager.currentCircuit.value?.verifiedExitIp,
-      generation = generation
-    )
+      val proxyApplied = NetworkHardening.applyTorNetworkSettings(geckoEngine.runtime, socksPort, generation)
+      if (!proxyApplied) {
+        val err = IllegalStateException("Failed to apply Gecko native Tor proxy preferences")
+        return@withContext failGhostTransition(generation, err, stage = "GECKO_PROXY")
+      }
+      DebugLogManager.log("[ROUTE] GECKO_PROXY_APPLIED generation=$generation")
 
-    geckoEngine.applyPrivacyProfile(PrivacyProfile.GHOST, socksPort, generation)
-    
-    // Ensure all tabs reflect the global APP-WIDE Tor proxy routing
-    TabManager.getInstance().setAllTabsProfile(PrivacyProfile.GHOST)
+      // Step 4: Verify Gecko is actually using the expected route
+      CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_GECKO, generation)
+      DebugLogManager.log("[ROUTE] PHASE=VERIFYING_GECKO generation=$generation")
 
-    DebugLogManager.log("[ROUTE] GHOST_ROUTE_READY profile=GHOST port=$socksPort exitIp=${torManager.currentCircuit.value?.verifiedExitIp ?: "Active"}")
-    Result.success(socksPort)
+      val geckoVerified = verifyGeckoTorRoute(6000L)
+      if (!geckoVerified) {
+        val err = IllegalStateException("Gecko native Tor proxy verification failed (not routing through Tor)")
+        return@withContext failGhostTransition(generation, err, stage = "GECKO_VERIFICATION")
+      }
+
+      DebugLogManager.log("[ROUTE] GECKO_ROUTE_VERIFIED generation=$generation")
+
+      // Step 5: Apply Privacy Profile before committing final READY route
+      val privacyProfileApplied = geckoEngine.applyPrivacyProfile(PrivacyProfile.GHOST, socksPort, generation)
+      if (!privacyProfileApplied) {
+        val err = IllegalStateException("Failed to apply Gecko privacy profile for Ghost mode")
+        return@withContext failGhostTransition(generation, err, stage = "GECKO_PRIVACY_PROFILE")
+      }
+
+      // Step 6: Advance route generation and update Single Source of Truth
+      val committed = CurrentTorRoute.updateRoute(
+        socksPort = socksPort,
+        isGhostActive = true,
+        isVerified = true,
+        exitIp = torManager.currentCircuit.value?.verifiedExitIp,
+        failoverDirect = false,
+        generation = generation
+      )
+
+      if (!committed) {
+        val err = IllegalStateException("Stale Ghost route transition (generation mismatch)")
+        return@withContext failGhostTransition(generation, err, stage = "STALE_COMMIT")
+      }
+
+      CurrentTorRoute.setPhase(GhostRoutePhase.READY, generation)
+
+      // Ensure all tabs reflect the global APP-WIDE Tor proxy routing
+      TabManager.getInstance().setAllTabsProfile(PrivacyProfile.GHOST)
+
+      DebugLogManager.log("[ROUTE] GHOST_ROUTE_READY profile=GHOST port=$socksPort exitIp=${torManager.currentCircuit.value?.verifiedExitIp ?: "Active"} generation=$generation")
+      Result.success(socksPort)
     }
   }
 
@@ -161,78 +248,97 @@ class PrivacyNetworkController private constructor(private val context: Context)
    * 2. Clears SOCKS proxy from WebExtension & native Gecko engine.
    * 3. Stops Tor and updates all tabs to reflect the direct clearnet routing.
    */
-  suspend fun enterShieldMode(tabId: String): Unit = transitionMutex.withLock { withContext(Dispatchers.IO) {
-    Log.i(TAG, "Entering Shield Mode for tab $tabId (restoring direct clearnet)...")
+  suspend fun enterShieldMode(tabId: String): Unit = transitionMutex.withLock {
+    withContext(Dispatchers.IO) {
+      Log.i(TAG, "Entering Shield Mode for tab $tabId (restoring direct clearnet)...")
 
-    geckoEngine.closeSessionSafely(tabId)
+      geckoEngine.closeSessionSafely(tabId)
 
-    val generation = CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
-    DebugLogManager.log("[ROUTE] REQUESTED profile=SHIELD tabId=$tabId generation=$generation")
-    torManager.stopTor()
-    NetworkHardening.applyShieldNetworkSettings(geckoEngine.runtime, generation)
-    geckoEngine.applyPrivacyProfile(PrivacyProfile.SHIELD, null, generation)
-    
-    // Ensure all tabs reflect the global APP-WIDE direct routing
-    TabManager.getInstance().setAllTabsProfile(PrivacyProfile.SHIELD)
+      val generation = CurrentTorRoute.clearRoute()
+      NetworkHardening.resetAppliedState()
+      DebugLogManager.log("[ROUTE] REQUESTED profile=SHIELD tabId=$tabId generation=$generation")
+      torManager.stopTor()
+      NetworkHardening.applyShieldNetworkSettings(geckoEngine.runtime, generation)
+      geckoEngine.applyPrivacyProfile(PrivacyProfile.SHIELD, null, generation)
 
-    DebugLogManager.log("[ROUTE] ACTIVE profile=SHIELD")
-  }
+      // Ensure all tabs reflect the global APP-WIDE direct routing
+      TabManager.getInstance().setAllTabsProfile(PrivacyProfile.SHIELD)
+
+      DebugLogManager.log("[ROUTE] ACTIVE profile=SHIELD generation=$generation")
+    }
   }
 
   /**
-   * Rotates Tor circuit using genuine NEWNYM signal.
+   * Rotates Tor circuit using genuine NEWNYM signal and full verification pipeline.
    */
   suspend fun rotateTorCircuit(): Result<TorCircuit> = transitionMutex.withLock {
-    val generation = CurrentTorRoute.markStartingGhost()
-    val result = torManager.refreshCircuit()
-    
-    if (result.isFailure) {
-      CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
-      return result
-    }
-    
-    val c = result.getOrNull()
-    if (c != null) {
+    withContext(Dispatchers.IO) {
+      if (!CurrentTorRoute.isReady) {
+        return@withContext Result.failure(
+          IllegalStateException("Cannot rotate: Ghost route is not ready")
+        )
+      }
+
+      val generation = CurrentTorRoute.markRotatingGhost()
+      DebugLogManager.log("[ROUTE] ROTATING generation=$generation")
+
+      val result = torManager.refreshCircuit(generation)
+      if (result.isFailure) {
+        val err = result.exceptionOrNull() ?: IllegalStateException("Tor circuit rotation failed")
+        failGhostTransition(generation, err, stage = "ROTATION_NEWNYM")
+        return@withContext Result.failure(err)
+      }
+
+      val c = result.getOrNull()
+      if (c == null) {
+        val err = IllegalStateException("Null circuit returned after rotation")
+        failGhostTransition(generation, err, stage = "ROTATION_NULL_CIRCUIT")
+        return@withContext Result.failure(err)
+      }
+
+      CurrentTorRoute.setPhase(GhostRoutePhase.APPLYING_GECKO, generation)
       val proxyApplied = NetworkHardening.applyTorNetworkSettings(geckoEngine.runtime, c.socksPort, generation)
       if (!proxyApplied) {
-        CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
-        return Result.failure(IllegalStateException("Failed to apply Gecko Tor proxy preferences on circuit rotation"))
+        val err = IllegalStateException("Failed to apply Gecko Tor proxy preferences on circuit rotation")
+        failGhostTransition(generation, err, stage = "ROTATION_GECKO_PROXY")
+        return@withContext Result.failure(err)
       }
-      
-      val geckoVerified = try {
-        val executor = GeckoWebExecutor(geckoEngine.runtime!!)
-        val request = WebRequest.Builder("https://check.torproject.org/api/ip").build()
-        val response = executor.fetch(request).poll(10000)
-        if (response != null && response.statusCode == 200) {
-          val bodyStream = response.body
-          if (bodyStream != null) {
-            val content = Scanner(bodyStream, "UTF-8").useDelimiter("\\A").next()
-            bodyStream.close()
-            content.contains("\"IsTor\":true")
-          } else false
-        } else false
-      } catch (e: Exception) {
-        false
-      }
-      
+
+      CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_GECKO, generation)
+      val geckoVerified = verifyGeckoTorRoute(10000L)
       if (!geckoVerified) {
-        CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
-        return Result.failure(IllegalStateException("Gecko native Tor proxy verification failed on circuit rotation"))
+        val err = IllegalStateException("Gecko native Tor proxy verification failed on circuit rotation")
+        failGhostTransition(generation, err, stage = "ROTATION_GECKO_VERIFY")
+        return@withContext Result.failure(err)
       }
-      
-      CurrentTorRoute.updateRoute(
+
+      val profileApplied = geckoEngine.applyPrivacyProfile(PrivacyProfile.GHOST, c.socksPort, generation)
+      if (!profileApplied) {
+        val err = IllegalStateException("Failed to apply Gecko privacy profile on circuit rotation")
+        failGhostTransition(generation, err, stage = "ROTATION_PRIVACY_PROFILE")
+        return@withContext Result.failure(err)
+      }
+
+      val committed = CurrentTorRoute.updateRoute(
         socksPort = c.socksPort,
         isGhostActive = true,
         isVerified = true,
         exitIp = c.verifiedExitIp,
+        failoverDirect = false,
         generation = generation
       )
+
+      if (!committed) {
+        val err = IllegalStateException("Stale route generation on rotation commit")
+        failGhostTransition(generation, err, stage = "ROTATION_STALE_COMMIT")
+        return@withContext Result.failure(err)
+      }
+
+      CurrentTorRoute.setPhase(GhostRoutePhase.READY, generation)
+      DebugLogManager.log("[ROUTE] GHOST_ROUTE_READY profile=GHOST port=${c.socksPort} exitIp=${c.verifiedExitIp ?: "Active"} generation=$generation")
+
+      Result.success(c)
     }
-    return result
   }
 
   /**
@@ -249,7 +355,7 @@ class PrivacyNetworkController private constructor(private val context: Context)
         socksHandshakePassed = false
       )
     }
-    return TorStatusChecker.verifyTorRouting(port)
+    return TorStatusChecker.verifyTorRouting(socksPort = port, currentGeneration = CurrentTorRoute.currentGeneration)
   }
 
   /**
@@ -257,9 +363,6 @@ class PrivacyNetworkController private constructor(private val context: Context)
    */
   fun isGhostRoutingReady(): Boolean {
     return CurrentTorRoute.isReady
-    
-      
-      
   }
 
   companion object {

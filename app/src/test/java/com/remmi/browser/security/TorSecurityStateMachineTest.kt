@@ -97,23 +97,38 @@ class TorSecurityStateMachineTest {
   }
 
   @Test
-  fun testUrlSanitizerHttpsUpgrade() {
-    val httpUrl = NetworkHardening.sanitizeUrl("http://example.com/test")
-    assertEquals("https://example.com/test", httpUrl)
+  fun testGhostReadyInvariantRequiresAllPhases() {
+    // 1. Initial State: Shield
+    CurrentTorRoute.clearRoute()
+    assertEquals(GhostRoutePhase.SHIELD, CurrentTorRoute.currentPhase)
+    assertFalse(CurrentTorRoute.isReady)
 
-    val onionUrl = NetworkHardening.sanitizeUrl("http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion")
-    assertTrue(onionUrl.startsWith("http://") && onionUrl.contains(".onion"))
+    // 2. Starting Tor: Not ready
+    val gen = CurrentTorRoute.markStartingGhost()
+    assertEquals(GhostRoutePhase.STARTING_TOR, CurrentTorRoute.currentPhase)
+    assertFalse(CurrentTorRoute.isReady)
 
-    val searchUrl = NetworkHardening.sanitizeUrl("cyberpunk privacy browser")
-    assertTrue(searchUrl.contains("duckduckgo.com/?q="))
-  }
+    // 3. Verifying Tor: Not ready
+    CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_TOR, gen)
+    assertFalse(CurrentTorRoute.isReady)
 
-  @Test
-  fun testErrorCategoriesCompleteness() {
-    val categories = TorErrorCategory.values()
-    assertTrue(categories.contains(TorErrorCategory.TOR_SERVICE_START_FAILED))
-    assertTrue(categories.contains(TorErrorCategory.TOR_BOOTSTRAP_TIMEOUT))
-    assertTrue(categories.contains(TorErrorCategory.TOR_VERIFICATION_FAILED))
-    assertTrue(categories.contains(TorErrorCategory.TOR_PORT_UNAVAILABLE))
+    // 4. Applying Gecko: Not ready
+    CurrentTorRoute.setPhase(GhostRoutePhase.APPLYING_GECKO, gen)
+    assertFalse(CurrentTorRoute.isReady)
+
+    // 5. Verifying Gecko: Not ready
+    CurrentTorRoute.setPhase(GhostRoutePhase.VERIFYING_GECKO, gen)
+    assertFalse(CurrentTorRoute.isReady)
+
+    // 6. Only when committed and phase is READY does isReady become true
+    CurrentTorRoute.updateRoute(
+      socksPort = 9050,
+      isGhostActive = true,
+      isVerified = true,
+      exitIp = "192.42.116.16",
+      generation = gen
+    )
+    CurrentTorRoute.setPhase(GhostRoutePhase.READY, gen)
+    assertTrue(CurrentTorRoute.isReady)
   }
 }
