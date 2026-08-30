@@ -59,9 +59,17 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
       try {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
         Log.i("RemmiApp", "Background initialization started...")
-        AdblockBridge.getInstance()
+        val bridge = AdblockBridge.getInstance()
         RemmiDatabase.bootstrap(this)
         SettingsRepository.getInstance(this)
+        val filterManager = com.remmi.adblock.FilterManager.getInstance(this, bridge)
+        kotlinx.coroutines.runBlocking {
+          try {
+            filterManager.ensureFiltersReady()
+          } catch (e: Throwable) {
+            Log.w("RemmiApp", "[ADBLOCK] Background filter bootstrap error: ${e.message}")
+          }
+        }
         Log.i("RemmiApp", "Background initialization completed.")
       } catch (e: Throwable) {
         Log.e("RemmiApp", "Error during background init: ${e.message}", e)

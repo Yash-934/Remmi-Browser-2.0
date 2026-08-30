@@ -64,6 +64,13 @@ class FilterSubscriptionPipelineTest {
     val subs = filterManager.subscriptions.value
     assertTrue("Default subscription list should not be empty", subs.isNotEmpty())
 
+    // Fresh install metadata should not have fake hardcoded numbers
+    for (sub in subs) {
+      if (sub.lastUpdated == 0L) {
+        assertEquals("Un-downloaded list must have 0 ruleCount initially", 0, sub.ruleCount)
+      }
+    }
+
     val firstSub = subs.first()
     val initialEnabled = firstSub.enabled
 
@@ -75,5 +82,22 @@ class FilterSubscriptionPipelineTest {
     filterManager.toggleSubscription(firstSub.id)
     val restoredSub = filterManager.subscriptions.value.first { it.id == firstSub.id }
     assertEquals(initialEnabled, restoredSub.enabled)
+  }
+
+  @Test
+  fun testAdblockBridgePreservesBaselineRulesAcrossCompilations() {
+    val baselineDecision = adblockBridge.evaluateDecision("https://google-analytics.com/analytics.js")
+    assertTrue("Baseline rule must be blocked before custom compilation", baselineDecision.blocked)
+
+    // Compile external list
+    val count = adblockBridge.compileRules("||custom-popup-ad.org^")
+    assertTrue("Compiled count must be positive", count > 0)
+
+    // Verify both external rule AND baseline rule are active
+    val externalDecision = adblockBridge.evaluateDecision("https://custom-popup-ad.org/ad.js")
+    assertTrue("External custom rule must be blocked", externalDecision.blocked)
+
+    val postCompileBaselineDecision = adblockBridge.evaluateDecision("https://google-analytics.com/analytics.js")
+    assertTrue("Baseline rule must remain active after external compilation", postCompileBaselineDecision.blocked)
   }
 }

@@ -26,5 +26,11 @@ class ExampleInstrumentedTest {
     val adblockBridge = AdblockBridge.getInstance()
     assertTrue("Native adblock library should be available on Android device", adblockBridge.isNativeAvailable())
     assertTrue("Native adblock self-test must succeed on Android device", adblockBridge.selfTest())
+
+    // Verify dynamic test rule compilation & matching by native engine
+    val compiledCount = adblockBridge.compileRules("||test-custom-banner-domain.com^")
+    assertTrue("Native compile should compile rules successfully", compiledCount > 0)
+    val decision = adblockBridge.evaluateDecision("https://test-custom-banner-domain.com/ad.jpg")
+    assertTrue("Custom rule must be blocked", decision.blocked)
   }
 }

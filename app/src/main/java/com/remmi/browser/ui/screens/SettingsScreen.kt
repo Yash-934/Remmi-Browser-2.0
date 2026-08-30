@@ -32,6 +32,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -1995,6 +1997,8 @@ private fun AdblockSubScreen(
 ) {
   val orangeTint = if (isLight) Color(0xFFEA580C) else Color(0xFFFB923C)
   val orangeBg = if (isLight) Color(0xFFFFF7ED) else Color(0xFF34190B)
+  val isUpdating by filterManager.isUpdating.collectAsState()
+  val scope = rememberCoroutineScope()
 
   LazyColumn(
     modifier = modifier,
@@ -2003,6 +2007,61 @@ private fun AdblockSubScreen(
     item {
       Spacer(modifier = Modifier.height(2.dp))
       SubSectionHeader("NATIVE ADBLOCK LIST SUBSCRIPTIONS", textSecondary)
+    }
+
+    // Manual Update Trigger & Status Card
+    item {
+      Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = cardBg),
+        modifier = Modifier
+          .fillMaxWidth()
+          .border(0.8.dp, cardBorder, RoundedCornerShape(18.dp))
+      ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = "Engine Synchronization",
+                color = textPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Bold
+              )
+              Text(
+                text = if (isUpdating) "Downloading & compiling filter rules..." else "EasyList, EasyPrivacy, and Fanboy rules",
+                color = textSecondary,
+                fontSize = 11.sp
+              )
+            }
+
+            Button(
+              onClick = {
+                scope.launch {
+                  filterManager.updateAllSubscriptions(force = true)
+                }
+              },
+              enabled = !isUpdating,
+              colors = ButtonDefaults.buttonColors(containerColor = orangeTint),
+              shape = RoundedCornerShape(10.dp),
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+              if (isUpdating) {
+                CircularProgressIndicator(modifier = Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Syncing...", fontSize = 11.5.sp, color = Color.White)
+              } else {
+                Icon(Icons.Default.Refresh, contentDescription = "Update", tint = Color.White, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Update All", fontSize = 11.5.sp, color = Color.White)
+              }
+            }
+          }
+        }
+      }
     }
 
     items(subscriptions) { sub ->
@@ -2045,9 +2104,14 @@ private fun AdblockSubScreen(
                 fontWeight = FontWeight.Bold
               )
               Spacer(modifier = Modifier.width(6.dp))
+              val ruleBadgeText = if (sub.ruleCount > 0) {
+                "(${sub.ruleCount} RULES)"
+              } else {
+                "(NOT DOWNLOADED)"
+              }
               Text(
-                text = "(${sub.ruleCount} RULES)",
-                color = orangeTint,
+                text = ruleBadgeText,
+                color = if (sub.ruleCount > 0) orangeTint else textSecondary,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold
               )

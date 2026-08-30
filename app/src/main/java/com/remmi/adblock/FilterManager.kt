@@ -44,7 +44,7 @@ class FilterManager(
       id = "easylist",
       title = "EasyList Core",
       description = "Primary ad-blocking filter list for standard tracking and display ads.",
-      ruleCount = 48500,
+      ruleCount = 0,
       enabled = prefs?.getBoolean("filter_easylist", true) ?: true,
       url = "https://easylist.to/easylist/easylist.txt"
     ),
@@ -52,7 +52,7 @@ class FilterManager(
       id = "easyprivacy",
       title = "EasyPrivacy (Anti-Telemetry)",
       description = "Blocks behavioral trackers, web analytics, and telemetry beacons.",
-      ruleCount = 31200,
+      ruleCount = 0,
       enabled = prefs?.getBoolean("filter_easyprivacy", true) ?: true,
       url = "https://easylist.to/easylist/easyprivacy.txt"
     ),
@@ -60,7 +60,7 @@ class FilterManager(
       id = "fanboy_annoyance",
       title = "Fanboy's Annoyance List",
       description = "Removes popups, cookie consent overlays, and social media tracking widgets.",
-      ruleCount = 22400,
+      ruleCount = 0,
       enabled = prefs?.getBoolean("filter_fanboy_annoyance", true) ?: true,
       url = "https://easylist.to/easylist/fanboy-annoyance.txt"
     ),
@@ -68,7 +68,7 @@ class FilterManager(
       id = "brave_unbreak",
       title = "Brave Unbreak",
       description = "Fixes sites broken by adblockers.",
-      ruleCount = 14800,
+      ruleCount = 0,
       enabled = prefs?.getBoolean("filter_brave_unbreak", true) ?: true,
       url = "https://raw.githubusercontent.com/brave/adblock-lists/master/brave-unbreak.txt"
     ),
@@ -224,6 +224,20 @@ class FilterManager(
     CoroutineScope(Dispatchers.IO).launch {
       loadPersistedRulesIntoBridgeAsync()
     }
+  }
+
+  suspend fun ensureFiltersReady(): Boolean = withContext(Dispatchers.IO) {
+    val cachedRulesCount = loadPersistedRulesIntoBridgeAsync()
+    val allDefaultCached = defaultList.all { sub ->
+      val file = filterDir?.let { File(it, "${sub.id}.txt") }
+      file != null && file.exists() && file.length() > 0
+    }
+    if (cachedRulesCount > 0 && allDefaultCached) {
+      Log.i(TAG, "[ADBLOCK] Cached filters verified and loaded: total_compiled=$cachedRulesCount")
+      return@withContext true
+    }
+    Log.i(TAG, "[ADBLOCK] Missing or incomplete cached filters, triggering background update...")
+    return@withContext updateAllSubscriptions(force = true)
   }
 
   suspend fun updateAllSubscriptions(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {

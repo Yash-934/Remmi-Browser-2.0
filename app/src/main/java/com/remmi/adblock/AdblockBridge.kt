@@ -183,19 +183,8 @@ class AdblockBridge {
 
   fun compileRules(rulesText: String): Int {
     Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] textLength=${rulesText.length}")
-    var compiledCount = 0
-    if (isNativeLoaded) {
-      try {
-        compiledCount = nativeCompileRules(rulesText)
-      } catch (e: Throwable) {
-        Log.e(TAG, "Native compile rules failed: ${e.message}", e)
-      }
-    }
-    blockedHostnames.clear()
-    blockedSubstrings.clear()
-    allowList.clear()
-
-    // Re-seed default tracker domains in Kotlin fallback
+    
+    // Always preserve default tracker domains & patterns
     val defaultDomains = listOf(
       "doubleclick.net", "googlesyndication.com", "google-analytics.com",
       "googletagmanager.com", "adservice.google.com", "admob.com",
@@ -214,28 +203,52 @@ class AdblockBridge {
       "advertising.com", "amazon-adsystem.com", "bidswitch.net",
       "revcontent.com", "mgid.com", "zergnet.com", "popads.net"
     )
-    blockedHostnames.addAll(defaultDomains)
-
     val defaultPatterns = listOf(
       "/ads/", "/ad-banner", "/advertisement", "/trackers/",
       "pixel.gif", "beacon.js", "analytics.js", "gtag/js",
       "pagead2.googlesyndication.com", "adserver.", "adsystem.",
       "telemetry.", "tracking.", "statcounter.com"
     )
+
+    val defaultRulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
+      defaultPatterns.joinToString("\n")
+
+    val combinedRulesText = if (rulesText.isNotBlank()) {
+      "$defaultRulesText\n$rulesText"
+    } else {
+      defaultRulesText
+    }
+
+    var compiledCount = 0
+    if (isNativeLoaded) {
+      try {
+        compiledCount = nativeCompileRules(combinedRulesText)
+      } catch (e: Throwable) {
+        Log.e(TAG, "Native compile rules failed: ${e.message}", e)
+      }
+    }
+    blockedHostnames.clear()
+    blockedSubstrings.clear()
+    allowList.clear()
+
+    // Re-seed default tracker domains in Kotlin fallback
+    blockedHostnames.addAll(defaultDomains)
     blockedSubstrings.addAll(defaultPatterns)
 
     // Also parse into Kotlin memory fallback
-    rulesText.lines().forEach { line ->
-      val trimmed = line.trim()
-      if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
-        if (trimmed.startsWith("@@")) {
-          allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
-        } else if (trimmed.startsWith("||")) {
-          blockedHostnames.add(trimmed.removePrefix("||").removeSuffix("^"))
-        } else {
-          blockedSubstrings.add(trimmed)
+    if (rulesText.isNotBlank()) {
+      rulesText.lines().forEach { line ->
+        val trimmed = line.trim()
+        if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
+          if (trimmed.startsWith("@@")) {
+            allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
+          } else if (trimmed.startsWith("||")) {
+            blockedHostnames.add(trimmed.removePrefix("||").removeSuffix("^"))
+          } else {
+            blockedSubstrings.add(trimmed)
+          }
+          if (!isNativeLoaded) compiledCount++
         }
-        if (!isNativeLoaded) compiledCount++
       }
     }
     Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
