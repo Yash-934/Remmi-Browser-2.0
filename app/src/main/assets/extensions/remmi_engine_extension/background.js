@@ -58,7 +58,14 @@ function connectNative() {
 
     port.onMessage.addListener((msg) => {
       if (!msg) return;
-      if (msg.type === "EXTRACT_HTML") {
+      if (msg.type === "CLEAR_CACHE" || msg.type === "RULES_UPDATED") {
+        DECISION_CACHE.clear();
+        console.log("[Remmi] Decision cache cleared on rules/profile update");
+      } else if (msg.type === "PROFILE_CHANGED") {
+        currentProfile = msg.profile || "SHIELD";
+        DECISION_CACHE.clear();
+        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision cache`);
+      } else if (msg.type === "EXTRACT_HTML") {
         const requestId = msg.requestId;
         const tabId = msg.tabId;
         if (tabId !== undefined && tabId !== null) {
@@ -141,7 +148,7 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // 2. Delegate network requests to Native Engine with fast-path filtering and LRU decision caching
-const BLOCKABLE_SCHEMES = ["http:", "https:"];
+let currentProfile = "SHIELD";
 const DECISION_CACHE = new Map();
 const MAX_CACHE_SIZE = 800;
 const CACHE_TTL_MS = 300000; // 5 minutes
@@ -175,15 +182,23 @@ browser.webRequest.onBeforeRequest.addListener(
       return { cancel: false };
     }
 
-    // Fast-Path 2: Check LRU Decision Cache to eliminate IPC overhead for repeat requests
+    const method = (details.method || "GET").toUpperCase();
+    const isIdempotent = (method === "GET" || method === "HEAD" || method === "OPTIONS");
+
+    // Fast-Path 2: Check LRU Decision Cache for idempotent requests to eliminate IPC overhead
     const origin = details.originUrl || details.documentUrl || "";
     const resType = details.type || "other";
-    const cacheKey = `${resType}|${origin}|${url}`;
+    const cacheKey = `${currentProfile}|${method}|${resType}|${origin}|${url}`;
 
-    const cached = getCachedDecision(cacheKey);
-    if (cached !== null) {
-      return { cancel: cached };
+    if (isIdempotent) {
+      const cached = getCachedDecision(cacheKey);
+      if (cached !== null) {
+        logToNative(`[WEBEXT_CACHE_HIT] type=${resType} cancel=${cached}`);
+        return { cancel: cached };
+      }
     }
+
+    logToNative(`[WEBEXT_CACHE_MISS] type=${resType} method=${method}`);
 
     try {
       const response = await browser.runtime.sendNativeMessage("remmi_engine_extension", {
@@ -194,7 +209,9 @@ browser.webRequest.onBeforeRequest.addListener(
       });
 
       const shouldCancel = !!(response && response.cancel === true);
-      setCachedDecision(cacheKey, shouldCancel);
+      if (isIdempotent) {
+        setCachedDecision(cacheKey, shouldCancel);
+      }
 
       if (shouldCancel) {
         if (port) {

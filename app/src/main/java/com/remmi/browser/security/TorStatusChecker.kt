@@ -5,6 +5,7 @@ import com.remmi.browser.util.DebugLogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -138,6 +139,7 @@ object TorStatusChecker {
               attemptsMade = attempt,
             )
           }
+          var primaryCall: Call? = null
           try {
             DebugLogManager.log("Verifying Tor exit routing via SOCKS 127.0.0.1:$socksPort (attempt $attempt/$maxAttempts)...")
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
@@ -153,7 +155,9 @@ object TorStatusChecker {
               .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
               .build()
 
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            primaryCall = call
+            call.execute().use { response ->
               val elapsed = System.currentTimeMillis() - startTime
               val body = response.body?.string() ?: ""
               if (response.isSuccessful && body.isNotBlank()) {
@@ -178,6 +182,7 @@ object TorStatusChecker {
             DebugLogManager.log("Tor verification primary check attempt $attempt failed: $lastErrorMessage")
             
             // Level 3b: Fallback IP verification via SOCKS5 proxy if primary check.torproject.org is rate-limited/slow
+            var fallbackCall: Call? = null
             try {
               val fallbackProxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved("127.0.0.1", socksPort))
               val fallbackClient = OkHttpClient.Builder()
@@ -192,7 +197,9 @@ object TorStatusChecker {
                 .header("User-Agent", AntiFingerprint.TOR_USER_AGENT)
                 .build()
 
-              fallbackClient.newCall(fallbackReq).execute().use { fbResponse ->
+              val fbCall = fallbackClient.newCall(fallbackReq)
+              fallbackCall = fbCall
+              fbCall.execute().use { fbResponse ->
                 val fbBody = fbResponse.body?.string() ?: ""
                 if (fbResponse.isSuccessful && fbBody.isNotBlank()) {
                   val json = JSONObject(fbBody)
@@ -213,7 +220,11 @@ object TorStatusChecker {
               }
             } catch (fbErr: Exception) {
               DebugLogManager.log("Tor fallback verification notice: ${fbErr.message}")
+            } finally {
+              try { fallbackCall?.cancel() } catch (_: Exception) {}
             }
+          } finally {
+            try { primaryCall?.cancel() } catch (_: Exception) {}
           }
 
           if (attempt < maxAttempts) {
