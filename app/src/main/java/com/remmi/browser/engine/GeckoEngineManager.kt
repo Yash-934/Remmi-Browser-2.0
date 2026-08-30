@@ -380,7 +380,7 @@ class GeckoEngineManager private constructor(private val context: Context) {
     // Wire Navigation delegate
     newSession.navigationDelegate = object : GeckoSession.NavigationDelegate {
       override fun onLoadRequest(session: GeckoSession, request: GeckoSession.NavigationDelegate.LoadRequest): GeckoResult<AllowOrDeny>? {
-        val url = request.uri
+        val url = request.uri ?: ""
         val tab = TabManager.getInstance().getTab(tabId)
         val isGhost = (tab?.profile == PrivacyProfile.GHOST) || (currentProfile == PrivacyProfile.GHOST)
         

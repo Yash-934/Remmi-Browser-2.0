@@ -21,13 +21,17 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
     val callFactory = Call.Factory { request ->
       val targetUrl = request.url.toString()
       val isGhost = CurrentTorRoute.isGhostActive || NetworkRouteAuthority.isOnionDestination(targetUrl)
-      val client = NetworkRouteAuthority.createHttpClient(
-        isGhost = isGhost,
-        targetUrl = targetUrl,
-        connectTimeoutSeconds = 10L,
-        readTimeoutSeconds = 15L
-      )
-      client.newCall(request)
+      try {
+        val client = NetworkRouteAuthority.createHttpClient(
+          isGhost = isGhost,
+          targetUrl = targetUrl,
+          connectTimeoutSeconds = 10L,
+          readTimeoutSeconds = 15L
+        )
+        client.newCall(request)
+      } catch (e: Exception) {
+        throw java.io.IOException("Route authority rejected Coil fetch: ${e.message}", e)
+      }
     }
 
     return ImageLoader.Builder(context)
