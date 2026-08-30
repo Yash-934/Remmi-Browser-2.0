@@ -66,6 +66,7 @@ jobs:
           echo "Please run ./tools/build-rust-android.sh locally and commit the fresh binaries."
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
+          echo "Trying to commit new binaries..."
           git add app/src/main/jniLibs/
           git commit -m "Auto-update stale native binaries"
           git push
