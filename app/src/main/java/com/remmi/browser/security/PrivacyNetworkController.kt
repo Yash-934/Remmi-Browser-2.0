@@ -73,13 +73,13 @@ class PrivacyNetworkController private constructor(private val context: Context)
     // Step 1: Terminate active clearnet session first
     geckoEngine.closeSessionSafely(tabId)
 
-    // Step 2: Bootstrap & verify Tor daemon
+    // Step 2: Bootstrap & verify Tor daemon (TorManager handles discovery, handshake & exit verification)
     val torResult = torManager.startTor()
     if (torResult.isFailure) {
       val error = torResult.exceptionOrNull() ?: Exception("Tor failed to initialize")
       Log.e(TAG, "Ghost Mode transition aborted: ${error.message}")
       CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
+      NetworkHardening.resetAppliedState()
       DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=${error.message}")
       return@withContext Result.failure(error)
     }
@@ -89,36 +89,16 @@ class PrivacyNetworkController private constructor(private val context: Context)
       if (discovered <= 0) {
         val err = IllegalStateException("SOCKS port discovery returned invalid port: $discovered")
         CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
+        NetworkHardening.resetAppliedState()
         DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=port_unavailable")
         return@withContext Result.failure(err)
       }
       discovered
     }
 
-    // Step 3: Verify SOCKS port handshake
-    val handshakeOk = TorStatusChecker.isPortListening("127.0.0.1", socksPort, 1500) &&
-      TorStatusChecker.verifySocks5Handshake("127.0.0.1", socksPort, 1500)
-    if (!handshakeOk) {
-      val err = IllegalStateException("Tor SOCKS5 handshake verification failed on port $socksPort")
-      CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
-      DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=socks_handshake_failed")
-      return@withContext Result.failure(err)
-    }
-
-    val routingOk = TorStatusChecker.verifyTorRouting(socksPort)
-    if (!routingOk.isTor) {
-      val err = IllegalStateException("Tor exit verification failed on port $socksPort")
-      torManager.stopTor()
-      CurrentTorRoute.clearRoute()
-      DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=tor_exit_failed")
-      return@withContext Result.failure(err)
-    }
-    DebugLogManager.log("[ROUTE] TOR_EXIT_VERIFIED ip=${routingOk.ip}")
-
     DebugLogManager.log("[ROUTE] SOCKS_VERIFIED port=$socksPort")
-    // Step 4: Apply hardened Tor preferences directly to native GeckoView engine
+
+    // Step 3: Apply hardened Tor preferences directly to native GeckoView engine
     val proxyApplied = NetworkHardening.applyTorNetworkSettings(geckoEngine.runtime, socksPort, generation)
     if (!proxyApplied) {
       val err = IllegalStateException("Failed to apply Gecko native Tor proxy preferences")
@@ -129,11 +109,11 @@ class PrivacyNetworkController private constructor(private val context: Context)
       return@withContext Result.failure(err)
     }
 
-    // Step 5: Verify Gecko is actually using the expected route
+    // Step 4: Verify Gecko is actually using the expected route with fast 5s bound
     val geckoVerified = try {
       val executor = GeckoWebExecutor(geckoEngine.runtime!!)
       val request = WebRequest.Builder("https://check.torproject.org/api/ip").build()
-      val response = executor.fetch(request).poll(10000)
+      val response = executor.fetch(request).poll(5000)
       if (response != null && response.statusCode == 200) {
         val bodyStream = response.body
         if (bodyStream != null) {
@@ -156,7 +136,7 @@ class PrivacyNetworkController private constructor(private val context: Context)
     }
 
     DebugLogManager.log("[ROUTE] GEOCKO_ROUTE_VERIFIED")
-    // Step 6: Advance route generation and update Single Source of Truth
+    // Step 5: Advance route generation and update Single Source of Truth
     CurrentTorRoute.updateRoute(
       socksPort = socksPort,
       isGhostActive = true,

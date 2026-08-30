@@ -140,27 +140,70 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-// 2. Delegate all network requests to the Rust Native Engine (P0-7)
+// 2. Delegate network requests to Native Engine with fast-path filtering and LRU decision caching
+const BLOCKABLE_SCHEMES = ["http:", "https:"];
+const DECISION_CACHE = new Map();
+const MAX_CACHE_SIZE = 800;
+const CACHE_TTL_MS = 300000; // 5 minutes
+
+function getCachedDecision(key) {
+  if (DECISION_CACHE.has(key)) {
+    const item = DECISION_CACHE.get(key);
+    if (Date.now() - item.ts < CACHE_TTL_MS) {
+      return item.cancel;
+    }
+    DECISION_CACHE.delete(key);
+  }
+  return null;
+}
+
+function setCachedDecision(key, cancel) {
+  if (DECISION_CACHE.size >= MAX_CACHE_SIZE) {
+    const firstKey = DECISION_CACHE.keys().next().value;
+    if (firstKey) DECISION_CACHE.delete(firstKey);
+  }
+  DECISION_CACHE.set(key, { cancel: !!cancel, ts: Date.now() });
+}
+
 browser.webRequest.onBeforeRequest.addListener(
   async function(details) {
     const url = details.url;
     if (!url) return { cancel: false };
 
+    // Fast-Path 1: Skip non-HTTP(S) internal protocols (e.g. data:, blob:, moz-extension:, about:)
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      return { cancel: false };
+    }
+
+    // Fast-Path 2: Check LRU Decision Cache to eliminate IPC overhead for repeat requests
+    const origin = details.originUrl || details.documentUrl || "";
+    const resType = details.type || "other";
+    const cacheKey = `${resType}|${origin}|${url}`;
+
+    const cached = getCachedDecision(cacheKey);
+    if (cached !== null) {
+      return { cancel: cached };
+    }
+
     try {
       const response = await browser.runtime.sendNativeMessage("remmi_engine_extension", {
         type: "SHOULD_BLOCK",
         url: url,
-        sourceUrl: details.originUrl || details.documentUrl || "",
-        resourceType: details.type || "other"
+        sourceUrl: origin,
+        resourceType: resType
       });
-      if (response && response.cancel === true) {
+
+      const shouldCancel = !!(response && response.cancel === true);
+      setCachedDecision(cacheKey, shouldCancel);
+
+      if (shouldCancel) {
         if (port) {
           try {
             port.postMessage({
               type: "BLOCKED",
               action: "blocked",
               url: url,
-              category: details.type || "tracker"
+              category: resType
             });
           } catch (_e) {}
         }
