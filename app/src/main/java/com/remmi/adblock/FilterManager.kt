@@ -184,6 +184,22 @@ class FilterManager(
     return _subscriptions.value.filter { it.enabled }.sumOf { it.ruleCount }
   }
 
+  fun logAdblockStatus() {
+    val easylist = _subscriptions.value.find { it.id == "easylist" }
+    val easyprivacy = _subscriptions.value.find { it.id == "easyprivacy" }
+    val totalActive = getTotalActiveRules()
+    val isNative = adblockBridge.isNativeAvailable()
+    val gen = adblockBridge.getEngineGeneration()
+    val blockedCount = adblockBridge.totalBlockedCount.get()
+
+    Log.i(
+      TAG,
+      "[ADBLOCK_STATUS] native=$isNative easylistDownloaded=${(easylist?.lastUpdated ?: 0L) > 0L} easyprivacyDownloaded=${(easyprivacy?.lastUpdated ?: 0L) > 0L} easylistRules=${easylist?.ruleCount ?: 0} easyprivacyRules=${easyprivacy?.ruleCount ?: 0} totalActiveRules=$totalActive engineGeneration=$gen"
+    )
+    Log.i(TAG, "[ADBLOCK_ENGINE] generation=$gen activeRules=$totalActive native=$isNative")
+    Log.i(TAG, "[ADBLOCK_METRICS] blocked=$blockedCount")
+  }
+
   private suspend fun loadPersistedRulesIntoBridgeAsync(): Int = withContext(Dispatchers.IO) {
     mutex.withLock {
       val dir = filterDir ?: return@withLock 0
@@ -196,7 +212,9 @@ class FilterManager(
           if (file.exists() && file.length() > 0) {
             try {
               val content = file.readText()
-              val lineCount = content.lines().count { it.isNotBlank() && !it.startsWith("!") }
+              val lines = content.lines()
+              val lineCount = lines.count { it.isNotBlank() && !it.startsWith("!") }
+              Log.d(TAG, "[ADBLOCK_PARSE] name=${sub.id} inputLines=${lines.size} validRules=$lineCount")
               Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} rules=$lineCount")
               rulesSummary.append("${sub.id}=$lineCount ")
               combinedRules.append(content).append("\n")
@@ -204,17 +222,20 @@ class FilterManager(
               Log.e(TAG, "Failed reading cached filter ${sub.id}: ${e.message}")
             }
           } else {
-            Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} cached=false fallback_count=${sub.ruleCount}")
+            Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} cached=false fallback_count=0")
             rulesSummary.append("${sub.id}=(cached:false) ")
           }
         }
       }
       if (combinedRules.isNotBlank()) {
         val compiled = adblockBridge.compileRules(combinedRules.toString())
+        Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
+        logAdblockStatus()
         return@withLock compiled
       } else {
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=0 (using default tracker rules)")
+        logAdblockStatus()
       }
       return@withLock 0
     }
@@ -234,10 +255,14 @@ class FilterManager(
     }
     if (cachedRulesCount > 0 && allDefaultCached) {
       Log.i(TAG, "[ADBLOCK] Cached filters verified and loaded: total_compiled=$cachedRulesCount")
+      logAdblockStatus()
       return@withContext true
     }
-    Log.i(TAG, "[ADBLOCK] Missing or incomplete cached filters, triggering background update...")
-    return@withContext updateAllSubscriptions(force = true)
+    Log.i(TAG, "[ADBLOCK] Missing or incomplete cached filters, starting background download without blocking...")
+    CoroutineScope(Dispatchers.IO).launch {
+      updateAllSubscriptions(force = false)
+    }
+    return@withContext false
   }
 
   suspend fun updateAllSubscriptions(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
@@ -254,8 +279,8 @@ class FilterManager(
         }
       }
       val compiledCount = loadPersistedRulesIntoBridgeAsync()
-      if (compiledCount < 0) {
-        successAll = false
+      if (compiledCount <= 0) {
+        Log.w(TAG, "[ADBLOCK] Subscriptions update completed but compiled count is $compiledCount")
       }
     } catch (e: Exception) {
       Log.e(TAG, "Error updating filter subscriptions: ${e.message}", e)
@@ -289,6 +314,8 @@ class FilterManager(
       }
 
       val body = response.body?.string() ?: return@withContext false
+      Log.d(TAG, "[ADBLOCK_LIST] name=${sub.id} downloaded=true bytes=${body.length}")
+
       // Max size limit: 15 MB
       if (body.length > 15 * 1024 * 1024) {
         Log.e(TAG, "Filter list ${sub.id} exceeds maximum size limit (15MB), rejecting.")
@@ -297,6 +324,7 @@ class FilterManager(
 
       // Basic validation: Check for adblock signatures or valid lines
       val lines = body.lines()
+      Log.d(TAG, "[ADBLOCK_PARSE] name=${sub.id} inputLines=${lines.size}")
       val validRuleCount = lines.count { line ->
         val trimmed = line.trim()
         trimmed.isNotEmpty() && !trimmed.startsWith("!") && (trimmed.startsWith("||") || trimmed.startsWith("@@") || trimmed.startsWith("##") || trimmed.contains("/"))
@@ -306,6 +334,8 @@ class FilterManager(
         Log.w(TAG, "Downloaded filter content for ${sub.id} is invalid or empty, keeping existing cache.")
         return@withContext false
       }
+
+      Log.d(TAG, "[ADBLOCK_COMPILE] name=${sub.id} compiled=$validRuleCount")
 
       // Save to disk atomically
       filterDir?.let { dir ->

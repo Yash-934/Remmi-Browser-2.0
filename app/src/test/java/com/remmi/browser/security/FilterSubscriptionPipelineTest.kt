@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.remmi.adblock.AdblockBridge
 import com.remmi.adblock.FilterManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -99,5 +102,35 @@ class FilterSubscriptionPipelineTest {
 
     val postCompileBaselineDecision = adblockBridge.evaluateDecision("https://google-analytics.com/analytics.js")
     assertTrue("Baseline rule must remain active after external compilation", postCompileBaselineDecision.blocked)
+    assertTrue("Engine generation must be positive", postCompileBaselineDecision.engineGeneration > 0)
+  }
+
+  @Test
+  fun testAdblockBridgeConcurrentEvaluation(): Unit = runBlocking(Dispatchers.Default) {
+    adblockBridge.compileRules("||concurrent-test-tracker.com^")
+    val jobs = (1..100).map { i ->
+      async {
+        val isAd = (i % 2 == 0)
+        val url = if (isAd) "https://concurrent-test-tracker.com/pixel_$i.png" else "https://github.com/torproject/tor/commit_$i"
+        val decision = adblockBridge.evaluateDecision(url)
+        assertEquals(isAd, decision.blocked)
+        assertTrue(decision.engineGeneration > 0)
+      }
+    }
+    jobs.awaitAll()
+  }
+
+  @Test
+  fun testValidOldEngineSurvivesFailedOrEmptyUpdate() {
+    adblockBridge.compileRules("||resilient-ad-server.com^")
+    val before = adblockBridge.evaluateDecision("https://resilient-ad-server.com/banner.js")
+    assertTrue("Initial rule must block", before.blocked)
+
+    // Compile empty rules
+    val compiledEmpty = adblockBridge.compileRules("   \n! comments only\n  ")
+    assertEquals(0, compiledEmpty)
+
+    val after = adblockBridge.evaluateDecision("https://resilient-ad-server.com/banner.js")
+    assertTrue("Engine must retain previous rules after failed or empty compile", after.blocked)
   }
 }

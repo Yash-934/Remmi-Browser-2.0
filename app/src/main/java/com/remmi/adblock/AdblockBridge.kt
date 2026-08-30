@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 enum class AdblockState {
   STARTING,
@@ -17,7 +18,19 @@ enum class AdblockState {
 data class BlockDecision(
   val blocked: Boolean,
   val ruleId: String? = null,
-  val ruleSource: String? = null
+  val ruleSource: String? = null,
+  val engineGeneration: Long = 0L
+)
+
+data class CosmeticResources(
+  val ok: Boolean,
+  val generation: Long,
+  val hideSelectors: List<String> = emptyList(),
+  val forceHideSelectors: List<String> = emptyList(),
+  val procedural: List<String> = emptyList(),
+  val proceduralCount: Int = 0,
+  val generics: Boolean = true,
+  val error: String? = null
 )
 
 /**
@@ -29,8 +42,12 @@ class AdblockBridge {
   private val blockedHostnames = ConcurrentHashMap.newKeySet<String>()
   private val blockedSubstrings = CopyOnWriteArrayList<String>()
   private val allowList = ConcurrentHashMap.newKeySet<String>()
+  private val fallbackCosmeticRules = CopyOnWriteArrayList<Pair<String?, String>>() // domain (or null for generic) to selector
+  private val fallbackCosmeticExceptions = ConcurrentHashMap.newKeySet<String>() // domain##selector or ##selector exception
 
   val totalBlockedCount = AtomicInteger(0)
+  private val localEngineGeneration = AtomicLong(1L)
+
   var isNativeLoaded: Boolean = false
     private set
 
@@ -44,6 +61,16 @@ class AdblockBridge {
   }
 
   fun isNativeAvailable(): Boolean = isNativeLoaded
+
+  fun getEngineGeneration(): Long {
+    if (isNativeLoaded) {
+      try {
+        val gen = nativeGetGeneration()
+        if (gen > 0) return gen
+      } catch (_: Throwable) {}
+    }
+    return localEngineGeneration.get()
+  }
 
   private fun initEngine() {
     try {
@@ -117,16 +144,24 @@ class AdblockBridge {
     }
 
     return try {
-      val blocked = nativeMatches(
-        "https://ads.example.com/banner.js",
-        "https://example.com/",
-        "script"
-      )
-      Log.d(TAG, "[ADBLOCK_SELF_TEST] native=true result=$blocked")
-      true
+      val ok = nativeSelfTest()
+      Log.d(TAG, "[ADBLOCK_SELF_TEST] native=true deterministic=$ok")
+      if (!ok) {
+        Log.e(TAG, "[ADBLOCK_SELF_TEST] deterministic_self_test_failed")
+      }
+      ok
     } catch (t: Throwable) {
       Log.e(TAG, "[ADBLOCK_SELF_TEST] native_failed", t)
       false
+    }
+  }
+
+  fun getNativeVersion(): String {
+    if (!isNativeLoaded) return "none"
+    return try {
+      nativeGetVersion()
+    } catch (_: Throwable) {
+      "unknown"
     }
   }
 
@@ -184,6 +219,12 @@ class AdblockBridge {
   fun compileRules(rulesText: String): Int {
     Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] textLength=${rulesText.length}")
     
+    val validLines = rulesText.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("!") }
+    if (validLines.isEmpty()) {
+      Log.d(TAG, "[ADBLOCK_COMPILE] empty or comment-only rulesText, preserving active engine")
+      return 0
+    }
+
     // Always preserve default tracker domains & patterns
     val defaultDomains = listOf(
       "doubleclick.net", "googlesyndication.com", "google-analytics.com",
@@ -220,6 +261,7 @@ class AdblockBridge {
     }
 
     var compiledCount = 0
+    val oldGen = getEngineGeneration()
     if (isNativeLoaded) {
       try {
         compiledCount = nativeCompileRules(combinedRulesText)
@@ -227,9 +269,14 @@ class AdblockBridge {
         Log.e(TAG, "Native compile rules failed: ${e.message}", e)
       }
     }
+    val newGen = localEngineGeneration.incrementAndGet()
+    Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
+
     blockedHostnames.clear()
     blockedSubstrings.clear()
     allowList.clear()
+    fallbackCosmeticRules.clear()
+    fallbackCosmeticExceptions.clear()
 
     // Re-seed default tracker domains in Kotlin fallback
     blockedHostnames.addAll(defaultDomains)
@@ -240,7 +287,16 @@ class AdblockBridge {
       rulesText.lines().forEach { line ->
         val trimmed = line.trim()
         if (trimmed.isNotEmpty() && !trimmed.startsWith("!")) {
-          if (trimmed.startsWith("@@")) {
+          if (trimmed.contains("#@#")) {
+            fallbackCosmeticExceptions.add(trimmed)
+          } else if (trimmed.contains("##")) {
+            val parts = trimmed.split("##", limit = 2)
+            val domain = parts[0].trim().ifEmpty { null }
+            val selector = parts[1].trim()
+            if (selector.isNotEmpty()) {
+              fallbackCosmeticRules.add(Pair(domain, selector))
+            }
+          } else if (trimmed.startsWith("@@")) {
             allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
           } else if (trimmed.startsWith("||")) {
             blockedHostnames.add(trimmed.removePrefix("||").removeSuffix("^"))
@@ -255,12 +311,191 @@ class AdblockBridge {
     return compiledCount
   }
 
+  fun getCosmeticResources(
+    url: String,
+    classes: List<String> = emptyList(),
+    ids: List<String> = emptyList(),
+    exceptions: List<String> = emptyList()
+  ): CosmeticResources {
+    val currentGen = getEngineGeneration()
+    if (isNativeLoaded) {
+      try {
+        val classesJson = org.json.JSONArray(classes).toString()
+        val idsJson = org.json.JSONArray(ids).toString()
+        val exceptionsJson = org.json.JSONArray(exceptions).toString()
+        val resultJson = nativeGetCosmeticResources(url, classesJson, idsJson, exceptionsJson)
+        if (resultJson.isNotBlank()) {
+          val obj = org.json.JSONObject(resultJson)
+          val ok = obj.optBoolean("ok", true)
+          val gen = obj.optLong("generation", currentGen)
+          val hideArray = obj.optJSONArray("hideSelectors")
+          val hideList = mutableListOf<String>()
+          if (hideArray != null) {
+            for (i in 0 until hideArray.length()) {
+              hideList.add(hideArray.getString(i))
+            }
+          }
+          val forceArray = obj.optJSONArray("forceHideSelectors")
+          val forceList = mutableListOf<String>()
+          if (forceArray != null) {
+            for (i in 0 until forceArray.length()) {
+              forceList.add(forceArray.getString(i))
+            }
+          }
+          val procArray = obj.optJSONArray("procedural")
+          val procList = mutableListOf<String>()
+          if (procArray != null) {
+            for (i in 0 until procArray.length()) {
+              procList.add(procArray.getString(i))
+            }
+          }
+          val procCount = obj.optInt("proceduralCount", procList.size)
+          val generics = obj.optBoolean("generics", true)
+          val err = if (obj.has("error")) obj.getString("error") else null
+
+          return CosmeticResources(
+            ok = ok,
+            generation = gen,
+            hideSelectors = hideList,
+            forceHideSelectors = forceList,
+            procedural = procList,
+            proceduralCount = procCount,
+            generics = generics,
+            error = err
+          )
+        }
+      } catch (t: Throwable) {
+        Log.e(TAG, "[COSMETIC_ERROR] native cosmetic lookup error: ${t.message}", t)
+      }
+    }
+
+    // Kotlin Fallback Engine
+    val host = try {
+      val uri = URI(url)
+      uri.host?.lowercase() ?: ""
+    } catch (_: Exception) { "" }
+
+    val hideList = mutableListOf<String>()
+    for ((domain, selector) in fallbackCosmeticRules) {
+      if (domain == null) {
+        // Generic rule
+        hideList.add(selector)
+      } else {
+        val domains = domain.split(",")
+        val matches = domains.any { d ->
+          val cleanD = d.trim().lowercase()
+          cleanD.isNotEmpty() && (host == cleanD || host.endsWith(".$cleanD"))
+        }
+        val isExcluded = domains.any { d ->
+          val cleanD = d.trim().lowercase()
+          cleanD.startsWith("~") && (host == cleanD.substring(1) || host.endsWith(".${cleanD.substring(1)}"))
+        }
+        if (matches && !isExcluded) {
+          hideList.add(selector)
+        }
+      }
+    }
+
+    // Apply exceptions
+    for (ex in fallbackCosmeticExceptions) {
+      val parts = ex.split("#@#", limit = 2)
+      if (parts.size == 2) {
+        val exDomain = parts[0].trim().lowercase()
+        val exSelector = parts[1].trim()
+        if (exDomain.isEmpty() || host == exDomain || host.endsWith(".$exDomain")) {
+          hideList.remove(exSelector)
+        }
+      }
+    }
+
+    return CosmeticResources(
+      ok = true,
+      generation = currentGen,
+      hideSelectors = hideList.distinct(),
+      forceHideSelectors = emptyList(),
+      procedural = emptyList(),
+      proceduralCount = 0,
+      generics = true,
+      error = null
+    )
+  }
+
+  fun getHiddenClassIdSelectors(
+    classes: List<String>,
+    ids: List<String>,
+    exceptions: List<String> = emptyList()
+  ): CosmeticResources {
+    val currentGen = getEngineGeneration()
+    if (isNativeLoaded) {
+      try {
+        val classesJson = org.json.JSONArray(classes).toString()
+        val idsJson = org.json.JSONArray(ids).toString()
+        val exceptionsJson = org.json.JSONArray(exceptions).toString()
+        val resultJson = nativeGetHiddenClassIdSelectors(classesJson, idsJson, exceptionsJson)
+        if (resultJson.isNotBlank()) {
+          val obj = org.json.JSONObject(resultJson)
+          val ok = obj.optBoolean("ok", true)
+          val gen = obj.optLong("generation", currentGen)
+          val hideArray = obj.optJSONArray("hideSelectors")
+          val hideList = mutableListOf<String>()
+          if (hideArray != null) {
+            for (i in 0 until hideArray.length()) {
+              hideList.add(hideArray.getString(i))
+            }
+          }
+          val forceArray = obj.optJSONArray("forceHideSelectors")
+          val forceList = mutableListOf<String>()
+          if (forceArray != null) {
+            for (i in 0 until forceArray.length()) {
+              forceList.add(forceArray.getString(i))
+            }
+          }
+          val procArray = obj.optJSONArray("procedural")
+          val procList = mutableListOf<String>()
+          if (procArray != null) {
+            for (i in 0 until procArray.length()) {
+              procList.add(procArray.getString(i))
+            }
+          }
+          val procCount = obj.optInt("proceduralCount", procList.size)
+          val generics = obj.optBoolean("generics", true)
+          val err = if (obj.has("error")) obj.getString("error") else null
+
+          return CosmeticResources(
+            ok = ok,
+            generation = gen,
+            hideSelectors = hideList,
+            forceHideSelectors = forceList,
+            procedural = procList,
+            proceduralCount = procCount,
+            generics = generics,
+            error = err
+          )
+        }
+      } catch (t: Throwable) {
+        Log.e(TAG, "[COSMETIC_ERROR] native hidden class/id lookup error: ${t.message}", t)
+      }
+    }
+
+    return CosmeticResources(
+      ok = true,
+      generation = currentGen,
+      hideSelectors = emptyList(),
+      forceHideSelectors = emptyList(),
+      procedural = emptyList(),
+      proceduralCount = 0,
+      generics = true,
+      error = null
+    )
+  }
+
   fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean {
     return evaluateDecision(url, sourceUrl, resourceType).blocked
   }
 
   fun evaluateDecision(url: String, sourceUrl: String = "", resourceType: String = "other"): BlockDecision {
     val startNs = System.nanoTime()
+    val currentGen = getEngineGeneration()
     try {
       if (isNativeLoaded) {
         try {
@@ -268,7 +503,12 @@ class AdblockBridge {
           if (blocked) {
             totalBlockedCount.incrementAndGet()
             logSlowDecisionIfNeeded(startNs, resourceType)
-            return BlockDecision(blocked = true, ruleId = "native", ruleSource = "RustEngine")
+            return BlockDecision(
+              blocked = true,
+              ruleId = "native",
+              ruleSource = "RustEngine",
+              engineGeneration = currentGen
+            )
           }
         } catch (t: Throwable) {
           state = AdblockState.DEGRADED
@@ -280,25 +520,40 @@ class AdblockBridge {
       val uri = try {
         URI(url)
       } catch (e: Exception) {
-        Log.e(TAG, "[ADBLOCK_DECISION_ERROR] invalid_url: $url", e)
+        Log.e(TAG, "[ADBLOCK_DECISION_ERROR] invalid_url: ${url.take(30)}...", e)
         throw e
       }
 
       val host = uri.host?.lowercase() ?: run {
         logSlowDecisionIfNeeded(startNs, resourceType)
-        return BlockDecision(blocked = false, ruleId = "invalid_host", ruleSource = "KotlinFallback")
+        return BlockDecision(
+          blocked = false,
+          ruleId = "invalid_host",
+          ruleSource = "KotlinFallback",
+          engineGeneration = currentGen
+        )
       }
 
       if (allowList.any { rule -> host == rule || host.endsWith(".$rule") }) {
         logSlowDecisionIfNeeded(startNs, resourceType)
-        return BlockDecision(blocked = false, ruleId = "allowlist", ruleSource = "KotlinFallback")
+        return BlockDecision(
+          blocked = false,
+          ruleId = "allowlist",
+          ruleSource = "KotlinFallback",
+          engineGeneration = currentGen
+        )
       }
 
       for (blockedHost in blockedHostnames) {
         if (host == blockedHost || host.endsWith(".$blockedHost")) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
-          return BlockDecision(blocked = true, ruleId = "host:$blockedHost", ruleSource = "KotlinFallback")
+          return BlockDecision(
+            blocked = true,
+            ruleId = "host:$blockedHost",
+            ruleSource = "KotlinFallback",
+            engineGeneration = currentGen
+          )
         }
       }
 
@@ -307,12 +562,22 @@ class AdblockBridge {
         if (lowerUrl.contains(pattern)) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
-          return BlockDecision(blocked = true, ruleId = "pattern:$pattern", ruleSource = "KotlinFallback")
+          return BlockDecision(
+            blocked = true,
+            ruleId = "pattern:$pattern",
+            ruleSource = "KotlinFallback",
+            engineGeneration = currentGen
+          )
         }
       }
 
       logSlowDecisionIfNeeded(startNs, resourceType)
-      return BlockDecision(blocked = false, ruleId = "none", ruleSource = "KotlinFallback")
+      return BlockDecision(
+        blocked = false,
+        ruleId = "none",
+        ruleSource = "KotlinFallback",
+        engineGeneration = currentGen
+      )
     } catch (t: Throwable) {
       Log.e(TAG, "[ADBLOCK_DECISION_ERROR] ${t.javaClass.name}: ${t.message}", t)
       throw t
@@ -340,8 +605,14 @@ class AdblockBridge {
   private external fun nativeInit(): Boolean
   private external fun nativeMatches(url: String, sourceUrl: String, requestType: String): Boolean
   private external fun nativeCompileRules(rulesText: String): Int
+  private external fun nativeGetCosmeticResources(url: String, classes: String, ids: String, exceptions: String): String
+  private external fun nativeGetHiddenClassIdSelectors(classes: String, ids: String, exceptions: String): String
   private external fun nativeGetFilterCount(): Int
   private external fun nativeGetBlockedCount(): Int
+  private external fun nativeGetGeneration(): Long
+  private external fun nativeGetEngineGeneration(): Long
+  private external fun nativeSelfTest(): Boolean
+  private external fun nativeGetVersion(): String
 
   companion object {
     private const val TAG = "AdblockBridge"
@@ -356,3 +627,4 @@ class AdblockBridge {
     }
   }
 }
+

@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["webrtc_block.js", "click_inspector.js"],
+      "js": ["webrtc_block.js", "click_inspector.js", "cosmetic_filter.js"],
       "run_at": "document_start",
       "all_frames": true
     }

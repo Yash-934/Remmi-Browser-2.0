@@ -88,6 +88,20 @@ class GeckoEngineManager private constructor(private val context: Context) {
       val policy = com.remmi.browser.security.SiteSecurityPolicyManager.getInstance(context).getPolicyForHost(host)
       policy.cookiePolicy == "ALLOW"
     }
+    blockExtension.cosmeticPolicyProvider = { host ->
+      val globalSettings = com.remmi.browser.storage.SettingsRepository.getInstance(context).settings.value
+      val globalCosmetic = globalSettings.cosmeticFilteringEnabled
+      val policy = com.remmi.browser.security.SiteSecurityPolicyManager.getInstance(context).getPolicyForHost(host)
+      if (policy.cookiePolicy == "ALLOW") {
+        false
+      } else {
+        when (policy.cosmeticPolicy) {
+          "ENABLED" -> true
+          "DISABLED" -> false
+          else -> globalCosmetic
+        }
+      }
+    }
   }
   enum class GeckoInitState {
     NOT_STARTED,

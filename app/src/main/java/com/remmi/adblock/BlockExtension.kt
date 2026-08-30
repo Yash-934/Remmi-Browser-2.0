@@ -38,6 +38,7 @@ enum class ExtensionState {
 class BlockExtension private constructor(private val adblockBridge: AdblockBridge) : WebExtension.MessageDelegate {
 
   var siteSecurityProvider: ((String) -> Boolean)? = null
+  var cosmeticPolicyProvider: ((String) -> Boolean)? = null
   // Global listeners (for passive threat and click interception events)
   private val threatListeners = CopyOnWriteArraySet<(url: String, type: String) -> Unit>()
   private val htmlListeners = CopyOnWriteArraySet<(url: String, html: String) -> Unit>()
@@ -161,6 +162,164 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
       )
     }
 
+    if (type == "BLOCK_ELEMENT") {
+      val selector = messageJson.optString("selector").trim()
+      val domain = messageJson.optString("domain").trim()
+      if (selector.isNotEmpty()) {
+        val rule = if (domain.isNotEmpty()) "$domain##$selector" else "##$selector"
+        adblockBridge.addCustomRule(rule)
+        Log.i(TAG, "[ADBLOCK_CUSTOM_RULE] Added element block rule: $rule")
+        return org.mozilla.geckoview.GeckoResult.fromValue(
+          JSONObject().apply {
+            put("ok", true)
+            put("rule", rule)
+            put("generation", adblockBridge.getEngineGeneration())
+          }
+        )
+      } else {
+        return org.mozilla.geckoview.GeckoResult.fromValue(
+          JSONObject().apply {
+            put("ok", false)
+            put("error", "empty_selector")
+          }
+        )
+      }
+    }
+
+    if (type == "GET_COSMETIC_RESOURCES") {
+      val url = messageJson.optString("url")
+      val hostname = messageJson.optString("hostname")
+      val classesArray = messageJson.optJSONArray("classes")
+      val idsArray = messageJson.optJSONArray("ids")
+      val exceptionsArray = messageJson.optJSONArray("exceptions")
+
+      val classes = mutableListOf<String>()
+      if (classesArray != null) {
+        for (i in 0 until classesArray.length()) classes.add(classesArray.getString(i))
+      }
+      val ids = mutableListOf<String>()
+      if (idsArray != null) {
+        for (i in 0 until idsArray.length()) ids.add(idsArray.getString(i))
+      }
+      val exceptions = mutableListOf<String>()
+      if (exceptionsArray != null) {
+        for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
+      }
+
+      val host = if (hostname.isNotEmpty()) hostname else try {
+        java.net.URI(if (url.contains("://")) url else "https://$url").host?.lowercase() ?: ""
+      } catch (_: Exception) { "" }
+
+      Log.d(TAG, "[COSMETIC_REQUEST] hostHash=${host.hashCode()} classCount=${classes.size} idCount=${ids.size}")
+
+      val isCosmeticAllowed = cosmeticPolicyProvider?.invoke(host) ?: true
+      if (!isCosmeticAllowed) {
+        Log.d(TAG, "[COSMETIC_RESULT] disabled_by_policy hostHash=${host.hashCode()}")
+        return org.mozilla.geckoview.GeckoResult.fromValue(
+          JSONObject().apply {
+            put("ok", true)
+            put("generation", adblockBridge.getEngineGeneration())
+            put("hideSelectors", org.json.JSONArray())
+            put("forceHideSelectors", org.json.JSONArray())
+            put("procedural", org.json.JSONArray())
+            put("proceduralCount", 0)
+            put("generics", false)
+          }
+        )
+      }
+
+      val result = org.mozilla.geckoview.GeckoResult<Any>()
+      extensionScope.launch {
+        try {
+          val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
+          Log.d(
+            TAG,
+            "[COSMETIC_RESULT] hide=${cosmetic.hideSelectors.size} forceHide=${cosmetic.forceHideSelectors.size} procedural=${cosmetic.proceduralCount} generation=${cosmetic.generation}"
+          )
+          result.complete(
+            JSONObject().apply {
+              put("ok", cosmetic.ok)
+              put("generation", cosmetic.generation)
+              put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+              put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+              put("procedural", org.json.JSONArray(cosmetic.procedural))
+              put("proceduralCount", cosmetic.proceduralCount)
+              put("generics", cosmetic.generics)
+              if (cosmetic.error != null) put("error", cosmetic.error)
+            }
+          )
+        } catch (t: Throwable) {
+          Log.e(TAG, "[COSMETIC_ERROR] error=${t.message}", t)
+          result.complete(
+            JSONObject().apply {
+              put("ok", false)
+              put("error", t.message ?: "exception")
+              put("generation", adblockBridge.getEngineGeneration())
+              put("hideSelectors", org.json.JSONArray())
+              put("forceHideSelectors", org.json.JSONArray())
+              put("procedural", org.json.JSONArray())
+              put("proceduralCount", 0)
+              put("generics", false)
+            }
+          )
+        }
+      }
+      return result
+    }
+
+    if (type == "GET_HIDDEN_CLASS_ID_SELECTORS") {
+      val classesArray = messageJson.optJSONArray("classes")
+      val idsArray = messageJson.optJSONArray("ids")
+      val exceptionsArray = messageJson.optJSONArray("exceptions")
+
+      val classes = mutableListOf<String>()
+      if (classesArray != null) {
+        for (i in 0 until classesArray.length()) classes.add(classesArray.getString(i))
+      }
+      val ids = mutableListOf<String>()
+      if (idsArray != null) {
+        for (i in 0 until idsArray.length()) ids.add(idsArray.getString(i))
+      }
+      val exceptions = mutableListOf<String>()
+      if (exceptionsArray != null) {
+        for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
+      }
+
+      val result = org.mozilla.geckoview.GeckoResult<Any>()
+      extensionScope.launch {
+        try {
+          val cosmetic = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
+          result.complete(
+            JSONObject().apply {
+              put("ok", cosmetic.ok)
+              put("generation", cosmetic.generation)
+              put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+              put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+              put("procedural", org.json.JSONArray(cosmetic.procedural))
+              put("proceduralCount", cosmetic.proceduralCount)
+              put("generics", cosmetic.generics)
+              if (cosmetic.error != null) put("error", cosmetic.error)
+            }
+          )
+        } catch (t: Throwable) {
+          Log.e(TAG, "[COSMETIC_ERROR] hidden class/id error=${t.message}", t)
+          result.complete(
+            JSONObject().apply {
+              put("ok", false)
+              put("error", t.message ?: "exception")
+              put("generation", adblockBridge.getEngineGeneration())
+              put("hideSelectors", org.json.JSONArray())
+              put("forceHideSelectors", org.json.JSONArray())
+              put("procedural", org.json.JSONArray())
+              put("proceduralCount", 0)
+              put("generics", false)
+            }
+          )
+        }
+      }
+      return result
+    }
+
     if (type != "SHOULD_BLOCK") {
       Log.w(TAG, "[WEBEXT_UNSUPPORTED_TYPE] type=$type")
       return org.mozilla.geckoview.GeckoResult.fromValue(
@@ -222,6 +381,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
             put("cancel", decision.blocked)
             if (decision.ruleId != null) put("ruleId", decision.ruleId)
             if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
+            put("generation", decision.engineGeneration)
           }
         )
 

@@ -90,13 +90,17 @@ function connectNative() {
         rulesGeneration++;
         DECISION_CACHE.clear();
         INFLIGHT_DECISIONS.clear();
-        console.log(`[Remmi] Decision cache cleared on rules/profile update (gen=${rulesGeneration})`);
+        COSMETIC_CACHE.clear();
+        INFLIGHT_COSMETIC.clear();
+        console.log(`[Remmi] Decision and cosmetic cache cleared on rules/profile update (gen=${rulesGeneration})`);
       } else if (msg.type === "PROFILE_CHANGED") {
         currentProfile = msg.profile || "SHIELD";
         rulesGeneration++;
         DECISION_CACHE.clear();
         INFLIGHT_DECISIONS.clear();
-        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision cache (gen=${rulesGeneration})`);
+        COSMETIC_CACHE.clear();
+        INFLIGHT_COSMETIC.clear();
+        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision/cosmetic cache (gen=${rulesGeneration})`);
       } else if (msg.type === "EXTRACT_HTML") {
         const requestId = msg.requestId;
         const tabId = msg.tabId;
@@ -145,7 +149,34 @@ function connectNative() {
 
 connectNative();
 
-// 1. Content Script Message Listener: Forward CLICK_INSPECTED -> native port -> BlockExtension
+// Cosmetic decision cache
+const COSMETIC_CACHE = new Map();
+const INFLIGHT_COSMETIC = new Map();
+const MAX_COSMETIC_CACHE_SIZE = 400;
+const COSMETIC_CACHE_TTL_MS = 300000; // 5 minutes
+
+function getCachedCosmetic(key) {
+  const item = COSMETIC_CACHE.get(key);
+  if (!item) return null;
+  if (Date.now() - item.ts < COSMETIC_CACHE_TTL_MS) {
+    return item.data;
+  }
+  COSMETIC_CACHE.delete(key);
+  return null;
+}
+
+function setCachedCosmetic(key, data) {
+  if (COSMETIC_CACHE.size >= MAX_COSMETIC_CACHE_SIZE) {
+    const firstKey = COSMETIC_CACHE.keys().next().value;
+    if (firstKey) COSMETIC_CACHE.delete(firstKey);
+  }
+  COSMETIC_CACHE.set(key, {
+    data: data,
+    ts: Date.now()
+  });
+}
+
+// 1. Content Script Message Listener: Forward CLICK_INSPECTED, GET_COSMETIC_RESOURCES, GET_HIDDEN_CLASS_ID_SELECTORS
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message) return;
   
@@ -173,6 +204,119 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     } else {
       pendingMessages.push(payload);
     }
+    if (sendResponse) sendResponse({ received: true });
+    return true;
+  }
+
+  if (message.type === "GET_COSMETIC_RESOURCES") {
+    const url = message.url || (_sender.tab ? _sender.tab.url : "");
+    const hostname = message.hostname || "";
+    const cacheKey = [
+      currentProfile,
+      rulesGeneration,
+      "URL_COSMETIC",
+      hostname,
+      url
+    ].join("|");
+
+    const cached = getCachedCosmetic(cacheKey);
+    if (cached) {
+      logToNative(`[WEBEXT_COSMETIC_CACHE_HIT] host=${hostname}`);
+      if (sendResponse) sendResponse(cached);
+      return true;
+    }
+
+    if (INFLIGHT_COSMETIC.has(cacheKey)) {
+      INFLIGHT_COSMETIC.get(cacheKey).then((data) => {
+        if (sendResponse) sendResponse(data);
+      });
+      return true;
+    }
+
+    const promise = (async () => {
+      try {
+        const resp = await withTimeout(
+          browser.runtime.sendNativeMessage("remmi_engine_extension", {
+            type: "GET_COSMETIC_RESOURCES",
+            url: url,
+            hostname: hostname,
+            classes: message.classes || [],
+            ids: message.ids || [],
+            exceptions: message.exceptions || []
+          }),
+          2000
+        );
+        if (resp && resp.ok) {
+          setCachedCosmetic(cacheKey, resp);
+        }
+        return resp || { ok: false, hideSelectors: [] };
+      } catch (e) {
+        logToNative(`[WEBEXT_COSMETIC_ERROR] error=${e?.message || String(e)}`);
+        return { ok: false, error: e?.message || "error", hideSelectors: [] };
+      } finally {
+        INFLIGHT_COSMETIC.delete(cacheKey);
+      }
+    })();
+
+    INFLIGHT_COSMETIC.set(cacheKey, promise);
+    promise.then((res) => {
+      if (sendResponse) sendResponse(res);
+    });
+    return true;
+  }
+
+  if (message.type === "GET_HIDDEN_CLASS_ID_SELECTORS") {
+    const classes = message.classes || [];
+    const ids = message.ids || [];
+    const cacheKey = [
+      currentProfile,
+      rulesGeneration,
+      "CLASS_ID_COSMETIC",
+      classes.slice().sort().join(","),
+      ids.slice().sort().join(",")
+    ].join("|");
+
+    const cached = getCachedCosmetic(cacheKey);
+    if (cached) {
+      if (sendResponse) sendResponse(cached);
+      return true;
+    }
+
+    if (INFLIGHT_COSMETIC.has(cacheKey)) {
+      INFLIGHT_COSMETIC.get(cacheKey).then((data) => {
+        if (sendResponse) sendResponse(data);
+      });
+      return true;
+    }
+
+    const promise = (async () => {
+      try {
+        const resp = await withTimeout(
+          browser.runtime.sendNativeMessage("remmi_engine_extension", {
+            type: "GET_HIDDEN_CLASS_ID_SELECTORS",
+            classes: classes,
+            ids: ids,
+            exceptions: message.exceptions || []
+          }),
+          2000
+        );
+        if (resp && resp.ok) {
+          setCachedCosmetic(cacheKey, resp);
+        }
+        return resp || { ok: false, hideSelectors: [] };
+      } catch (e) {
+        logToNative(`[WEBEXT_COSMETIC_CLASS_ERROR] error=${e?.message || String(e)}`);
+        return { ok: false, error: e?.message || "error", hideSelectors: [] };
+      } finally {
+        INFLIGHT_COSMETIC.delete(cacheKey);
+      }
+    })();
+
+    INFLIGHT_COSMETIC.set(cacheKey, promise);
+    promise.then((res) => {
+      if (sendResponse) sendResponse(res);
+    });
+    return true;
   }
 
   if (sendResponse) sendResponse({ received: true });
@@ -300,6 +444,10 @@ async function getNativeDecision(details, cacheKey) {
       throw new Error(
         `native_decision_invalid:${response?.error || "unknown"}`
       );
+    }
+
+    if (response.generation && response.generation > rulesGeneration) {
+      rulesGeneration = response.generation;
     }
 
     return response.cancel === true;

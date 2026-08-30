@@ -192,6 +192,7 @@ data class BrowserSettings(
   val strictReferrerPolicy: Boolean = true,
   val torBridgeMode: String = "DIRECT",
   val autoRouteOnionTabs: Boolean = true,
+  val cosmeticFilteringEnabled: Boolean = true,
 )
 
 class SettingsRepository(context: Context) {
@@ -257,6 +258,7 @@ class SettingsRepository(context: Context) {
       strictReferrerPolicy = prefs.getBoolean("strict_referrer", true),
       torBridgeMode = prefs.getString("tor_bridge_mode", "DIRECT") ?: "DIRECT",
       autoRouteOnionTabs = prefs.getBoolean("auto_route_onion", true),
+      cosmeticFilteringEnabled = prefs.getBoolean("cosmetic_filtering_enabled", true),
     )
   }
 
@@ -462,6 +464,11 @@ class SettingsRepository(context: Context) {
   fun updateAutoRouteOnionTabs(enabled: Boolean) {
     prefs.edit().putBoolean("auto_route_onion", enabled).apply()
     _settings.value = _settings.value.copy(autoRouteOnionTabs = enabled)
+  }
+
+  fun updateCosmeticFiltering(enabled: Boolean) {
+    prefs.edit().putBoolean("cosmetic_filtering_enabled", enabled).apply()
+    _settings.value = _settings.value.copy(cosmeticFilteringEnabled = enabled)
   }
 
   companion object {
