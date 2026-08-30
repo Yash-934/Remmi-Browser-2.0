@@ -30,8 +30,8 @@ data class NavigationCheckResult(
 object NavigationSecurityAuthority {
   private const val TAG = "NavSecurityAuthority"
 
-  private val BLOCKED_SCHEMES = setOf(
-    "javascript", "data", "file", "content", "chrome", "resource", "intent", "filesystem", "blob", "jar"
+  private val ALLOWED_SCHEMES = setOf(
+    "http", "https", "about"
   )
 
   fun validateAndSanitizeNavigation(rawUrl: String, isGhost: Boolean = false): NavigationCheckResult {
@@ -52,11 +52,11 @@ object NavigationSecurityAuthority {
       ""
     }
 
-    if (BLOCKED_SCHEMES.contains(scheme)) {
-      Log.w(TAG, "Navigation BLOCKED: dangerous scheme '$scheme' in $trimmed")
+    if (scheme.isNotEmpty() && !ALLOWED_SCHEMES.contains(scheme)) {
+      Log.w(TAG, "Navigation BLOCKED: dangerous or unsupported scheme '$scheme' in $trimmed")
       return NavigationCheckResult(
         NavigationDecision.BLOCK,
-        reason = "Forbidden dangerous URL scheme '$scheme:'"
+        reason = "Unsupported navigation scheme '$scheme:'"
       )
     }
 

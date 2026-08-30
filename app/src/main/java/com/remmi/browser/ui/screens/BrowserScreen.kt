@@ -418,8 +418,8 @@ fun BrowserScreen(
   val handleOpenGhostTab: (String?) -> Unit = { url ->
     scope.launch {
       isWaitingForTor = true
-      // Create tab as SHIELD initially to prevent routing leaks before Tor is ready
-      tabManager.openTab(url = url ?: "about:blank", profile = PrivacyProfile.SHIELD)
+      // Create tab as GHOST with blank url to prevent routing leaks before Tor is ready
+      tabManager.openTab(url = "about:blank", profile = PrivacyProfile.GHOST)
       val newTabId = tabManager.tabs.value.last().id
       privacyController.enterGhostMode(newTabId).onSuccess { port ->
         isWaitingForTor = false
@@ -429,6 +429,12 @@ fun BrowserScreen(
             "Ghost Mode Active • Encrypted Tor Routing (127.0.0.1:$port)",
             android.widget.Toast.LENGTH_SHORT
           ).show()
+        }
+        if (com.remmi.browser.security.CurrentTorRoute.isReady) {
+            val sanitized = url ?: "about:blank"
+            if (sanitized != "about:blank") {
+                geckoEngine.loadUrl(newTabId, sanitized)
+            }
         }
       }.onFailure { err ->
         isWaitingForTor = false
@@ -677,7 +683,7 @@ fun BrowserScreen(
             androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(24.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(horizontal = 16.dp)) {
               Button(
-                onClick = { scope.launch { torManager.startTor() } },
+                onClick = { scope.launch { privacyController.enterGhostMode(activeTab.id) } },
                 colors = ButtonDefaults.buttonColors(containerColor = ThemeCyber.colors.torPurple),
                 shape = RoundedCornerShape(6.dp),
               ) {
@@ -1858,10 +1864,10 @@ fun BrowserScreen(
         torState = torState,
         circuit = circuit,
         onRotateCircuit = {
-          scope.launch { torManager.refreshCircuit() }
+          scope.launch { privacyController.rotateTorCircuit() }
         },
         onStartTor = {
-          scope.launch { torManager.startTor() }
+          scope.launch { privacyController.enterGhostMode(activeTab.id) }
         },
         onLaunchOrbot = {
           torManager.getOrbotStartIntent()?.let { intent ->

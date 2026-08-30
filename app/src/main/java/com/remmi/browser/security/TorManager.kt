@@ -492,21 +492,19 @@ class TorManager(private val context: Context) {
     return context.packageManager.getLaunchIntentForPackage("org.torproject.android")
   }
 
-  fun stopTor() {
-    CoroutineScope(Dispatchers.IO).launch {
-      startMutex.withLock {
-        try {
-          TorServiceLauncher.stop(context)
-          DebugLogManager.log("Tor service stop requested")
-        } catch (t: Throwable) {
-          Log.w(TAG, "Stop Tor service notice: ${t.message}")
-        }
+  suspend fun stopTor() = withContext(Dispatchers.IO) {
+    startMutex.withLock {
+      try {
+        TorServiceLauncher.stop(context)
+        DebugLogManager.log("Tor service stop requested")
+      } catch (t: Throwable) {
+        Log.w(TAG, "Stop Tor service notice: ${t.message}")
+      }
 
-        withContext(Dispatchers.Main) {
-          CurrentTorRoute.markShieldActive()
-          _bootstrapState.value = TorState.OFF
-          _currentCircuit.value = null
-        }
+      withContext(Dispatchers.Main) {
+        CurrentTorRoute.markShieldActive()
+        _bootstrapState.value = TorState.OFF
+        _currentCircuit.value = null
       }
     }
   }

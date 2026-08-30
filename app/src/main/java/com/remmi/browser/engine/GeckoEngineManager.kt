@@ -156,6 +156,12 @@ class GeckoEngineManager private constructor(private val context: Context) {
       .aboutConfigEnabled(com.remmi.browser.BuildConfig.DEBUG)
       .consoleOutput(com.remmi.browser.BuildConfig.DEBUG)
       .build()
+      
+    try {
+        settings.setLnaEnabled(false)
+    } catch (e: Exception) {
+        Log.w(TAG, "LNA API not available on this GeckoView version", e)
+    }
 
     val rt = GeckoRuntime.create(context, settings)
 

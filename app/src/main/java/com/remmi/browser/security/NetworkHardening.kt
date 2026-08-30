@@ -32,7 +32,9 @@ object NetworkHardening {
       "network.proxy.socks_port" to torPort,
       "network.proxy.socks_version" to 5,
       "network.proxy.socks_remote_dns" to true,
+      "network.proxy.socks5_remote_dns" to true,
       "network.proxy.failover_direct" to false, // CRITICAL: zero clearnet leak
+      "network.proxy.allow_bypass" to false,
       "network.proxy.no_proxies_on" to "",
       "network.trr.mode" to 5, // TRR disabled in Ghost mode: all DNS routed via Tor remote DNS
       "media.peerconnection.enabled" to false, // WebRTC completely blocked
@@ -180,15 +182,20 @@ object NetworkHardening {
         "network.proxy.type",
         "network.proxy.socks",
         "network.proxy.socks_port",
+        "network.proxy.socks_version",
         "network.proxy.socks_remote_dns",
-        "network.proxy.failover_direct"
+        "network.proxy.socks5_remote_dns",
+        "network.proxy.failover_direct",
+        "network.proxy.no_proxies_on"
       )
       val readBack = prefController.getPreferences(verifyKeys)
       val isReadbackValid = readBack["network.proxy.type"] == 1 &&
         readBack["network.proxy.socks"] == "127.0.0.1" &&
         readBack["network.proxy.socks_port"] == port &&
-        readBack["network.proxy.socks_remote_dns"] == true &&
-        readBack["network.proxy.failover_direct"] == false
+        readBack["network.proxy.socks_version"] == 5 &&
+        readBack["network.proxy.socks5_remote_dns"] == true &&
+        readBack["network.proxy.failover_direct"] == false &&
+        readBack["network.proxy.no_proxies_on"] == ""
       
       if (!isReadbackValid) {
         Log.e(TAG, "Critical Ghost preferences readback failed! Expected proxy on $port but got: $readBack")

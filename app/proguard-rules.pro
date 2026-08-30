@@ -42,9 +42,8 @@
 -dontwarn org.torproject.**
 
 # SQLCipher Database Encryption
--keep class net.sqlcipher.** { *; }
--keep class net.sqlcipher.database.** { *; }
--dontwarn net.sqlcipher.**
+-keep class net.zetetic.database.sqlcipher.** { *; }
+-dontwarn net.zetetic.database.sqlcipher.**
 
 # Common Android missing classes referenced by transitive dependencies (R8 fix)
 -dontwarn java.beans.**

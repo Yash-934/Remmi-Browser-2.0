@@ -41,13 +41,13 @@ secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
-sqlcipher = "4.17.0"
+sqlcipher = "4.18.0"
 sqliteKtx = "2.7.0"
-jsoup = "1.18.3"
+jsoup = "1.22.1"
 
 
 [libraries]
-bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version = "1.81" }
+bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version = "1.84" }
 jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
 sqlcipher = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 androidx-sqlite-ktx = { group = "androidx.sqlite", name = "sqlite-ktx", version.ref = "sqliteKtx" }

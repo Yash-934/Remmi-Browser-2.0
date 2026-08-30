@@ -44,6 +44,7 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
 
   override fun onCreate() {
     super.onCreate()
+    com.remmi.browser.storage.SqlCipherInitializer.ensureLoaded()
 
     // Global Uncaught Exception Handler to capture crash logs & export to Downloads
     com.remmi.browser.util.CrashHandlerHelper.install(this)

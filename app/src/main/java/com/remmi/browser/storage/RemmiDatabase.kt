@@ -625,30 +625,39 @@ abstract class RemmiDatabase : RoomDatabase() {
           d = bootstrapScope.async(Dispatchers.IO) {
             val startTime = android.os.SystemClock.elapsedRealtime()
             try {
-            } catch (_: Throwable) {}
-            val passphrase = getOrCreatePassphrase(ctx)
-            val supportFactory = SupportOpenHelperFactory(passphrase, null, false)
-            val instance = Room.databaseBuilder(
-              ctx,
-              RemmiDatabase::class.java,
-              "remmi_vault.db"
-            )
-              .openHelperFactory(supportFactory)
-              .fallbackToDestructiveMigration(false)
-              .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
-              .build()
-            INSTANCE = instance
-            _databaseState.value = DatabaseState.Ready(instance)
-            val duration = android.os.SystemClock.elapsedRealtime() - startTime
-            android.util.Log.i("RemmiDatabase", "Asynchronous database initialization completed in ${duration}ms")
-            initDeferred = null
-            instance
+              SqlCipherInitializer.ensureLoaded()
+              val passphrase = getOrCreatePassphrase(ctx)
+              val supportFactory = SupportOpenHelperFactory(passphrase, null, false)
+              val instance = Room.databaseBuilder(
+                ctx,
+                RemmiDatabase::class.java,
+                "remmi_vault.db"
+              )
+                .openHelperFactory(supportFactory)
+                .fallbackToDestructiveMigration(false)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .build()
+              INSTANCE = instance
+              _databaseState.value = DatabaseState.Ready(instance)
+              val duration = android.os.SystemClock.elapsedRealtime() - startTime
+              android.util.Log.i("RemmiDatabase", "Asynchronous database initialization completed in ${duration}ms")
+              instance
+            } catch (t: Throwable) {
+              _databaseState.value = DatabaseState.Error(t)
+              throw t
+            } finally {
+              initDeferred = null
+            }
           }
           initDeferred = d
         }
         d
       }
-      deferred!!.await()
+      try {
+        deferred!!.await()
+      } catch (t: Throwable) {
+        throw kotlinx.coroutines.CancellationException("Database unavailable: ${t.message}").apply { initCause(t) }
+      }
     }
 
     data class PurgeResult(

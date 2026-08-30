@@ -49,6 +49,8 @@ fun SecurityCenterScreen(
   modifier: Modifier = Modifier
 ) {
   val scope = rememberCoroutineScope()
+  val context = androidx.compose.ui.platform.LocalContext.current
+  val privacyController = androidx.compose.runtime.remember { com.remmi.browser.security.PrivacyNetworkController.getInstance(context) }
   val settings by settingsRepo.settings.collectAsState()
   val torStateFlow = remember(torManager) { torManager?.bootstrapState ?: MutableStateFlow<TorManager.TorState>(TorManager.TorState.OFF) }
   val torState by torStateFlow.collectAsState()
@@ -487,7 +489,7 @@ fun SecurityCenterScreen(
                     isRotatingCircuit = true
                     newnymStatusMessage = "Requesting new circuit identity..."
                     scope.launch {
-                      val res = torManager.refreshCircuit()
+                      val res = privacyController.rotateTorCircuit()
                       isRotatingCircuit = false
                       newnymStatusMessage = if (res.isSuccess) {
                         "New Tor Identity established successfully!"
