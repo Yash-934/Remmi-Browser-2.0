@@ -112,18 +112,24 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatches(
     };
 
     if let Ok(req) = Request::new(&url_str, &source_str, &type_str) {
+        let mut def_matched = false;
+        let mut def_exception = false;
+        let mut def_important = false;
+        
+        let mut add_matched = false;
+        let mut add_exception = false;
+        let mut add_important = false;
+
         let mut block = false;
         let mut final_important = false;
-        
-        let mut debug_info = String::new();
-        debug_info.push_str(&format!("URL: {}
-", url_str));
 
         if let Some(ref default_eng) = *default_guard {
             let result = default_eng.check_network_request(&req);
-            debug_info.push_str(&format!("Default: matched={}, exception={}, important={}
-", result.matched, result.exception.is_some(), result.important));
             if result.matched {
+                def_matched = true;
+                def_exception = result.exception.is_some();
+                def_important = result.important;
+                
                 if result.important {
                     final_important = true;
                 }
@@ -133,9 +139,11 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatches(
 
         if let Some(ref additional) = *additional_guard {
             let result = additional.check_network_request(&req);
-            debug_info.push_str(&format!("Additional: matched={}, exception={}, important={}
-", result.matched, result.exception.is_some(), result.important));
             if result.matched {
+                add_matched = true;
+                add_exception = result.exception.is_some();
+                add_important = result.important;
+                
                 if !final_important {
                     if result.exception.is_some() {
                         block = false;
@@ -146,8 +154,17 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatches(
             }
         }
         
-        let _ = std::fs::write(format!("/tmp/remmi_debug_{}.txt", url_str.replace("/", "_")), debug_info);
-
+        #[cfg(debug_assertions)]
+        {
+            println!(
+                "[AB_DECISION] type={} host={} thirdParty={} defaultMatched={} defaultException={} defaultImportant={} additionalMatched={} additionalException={} additionalImportant={} finalBlocked={}",
+                type_str,
+                url_str, // We use url_str here as host proxy for debug
+                false, // Request doesn't expose third_party easily without host matching, so stubbing
+                def_matched, def_exception, def_important,
+                add_matched, add_exception, add_important, block
+            );
+        }
 
         if block {
             GLOBAL_STATE.blocked_count.fetch_add(1, Ordering::Relaxed);
@@ -521,4 +538,99 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetVersion(
     let version = "adblock-rust-0.8.0-remmi";
     let output = env.new_string(version).expect("Couldn't create java string!");
     output.into_raw()
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetBuildId(
+    env: JNIEnv,
+    _class: JClass,
+) -> JString {
+    let build_id = option_env!("NATIVE_BUILD_ID").unwrap_or("unknown");
+    env.new_string(build_id).unwrap_or_else(|_| env.new_string("").unwrap())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetAbi(
+    env: JNIEnv,
+    _class: JClass,
+) -> JString {
+    let abi = option_env!("NATIVE_BUILD_ABI").unwrap_or("unknown");
+    env.new_string(abi).unwrap_or_else(|_| env.new_string("").unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adblock::lists::{FilterSet, ParseOptions};
+    use adblock::engine::Engine;
+    use adblock::request::Request;
+
+    #[test]
+    fn test_diagnostic_urls() {
+        let mut default_filters = FilterSet::new(true);
+        default_filters.add_filters(&vec![
+            "||google-analytics.com^",
+            "||sentry-cdn.com^",
+            "||adblock-tester.com/banners/*",
+            "||adblock-tester.com/banners/pr_advertising_ads_banner.png",
+            "||default-block.com^",
+            "@@||default-exception.com^",
+            "||default-important.com^$important",
+            "||override-block.com^",
+        ], ParseOptions::default());
+        let default_eng = Engine::from_filter_set(default_filters, true);
+
+        let mut add_filters = FilterSet::new(true);
+        add_filters.add_filters(&vec![
+            "@@||override-block.com^",
+            "||additional-block.com^",
+            "@@||default-important.com^" // Weak exception against strong block
+        ], ParseOptions::default());
+        let add_eng = Engine::from_filter_set(add_filters, true);
+
+        let urls = vec![
+            ("GA", "https://www.google-analytics.com/analytics.js", "https://example.com/", "script"),
+            ("Sentry", "https://browser.sentry-cdn.com/bundle.min.js", "https://example.com/", "script"),
+            ("static banner", "https://adblock-tester.com/banners/pr_advertising_ads_banner.png", "https://adblock-tester.com/", "image"),
+            ("gif banner", "https://adblock-tester.com/banners/pr_advertising_ads_banner.gif", "https://adblock-tester.com/", "image"),
+            ("a) default block", "https://default-block.com/test", "https://example.com/", "script"),
+            ("b) default exception", "https://default-exception.com/test", "https://example.com/", "script"),
+            ("c) default important", "https://default-important.com/test", "https://example.com/", "script"),
+            ("d) additional exception overrides default block", "https://override-block.com/test", "https://example.com/", "script"),
+            ("e) additional ordinary block", "https://additional-block.com/test", "https://example.com/", "script"),
+            ("f) important default block NOT overridden", "https://default-important.com/test", "https://example.com/", "script"),
+            ("g) no-match => allow", "https://no-match-whatsoever.com/test", "https://example.com/", "script"),
+        ];
+
+        println!("\n=== DIAGNOSTIC START ===");
+        for (desc, url, source, req_type) in urls {
+            let req = Request::new(url, source, req_type).unwrap();
+            let def_res = default_eng.check_network_request(&req);
+            let add_res = add_eng.check_network_request(&req);
+
+            let mut block = false;
+            let mut final_important = false;
+
+            if def_res.matched {
+                if def_res.important {
+                    final_important = true;
+                }
+                block = def_res.exception.is_none();
+            }
+
+            if add_res.matched {
+                if !final_important {
+                    if add_res.exception.is_some() {
+                        block = false;
+                    } else {
+                        block = true;
+                    }
+                }
+            }
+
+            println!("{} -> blocked={}", desc, block);
+        }
+        println!("=== DIAGNOSTIC END ===\n");
+    }
 }

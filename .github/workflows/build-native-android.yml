@@ -1,0 +1,94 @@
+name: Build Native Android
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'rust/**'
+      - 'app/src/main/jniLibs/**'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'app/src/main/jniLibs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android NDK
+      run: |
+        sdkmanager "ndk;25.1.8937393"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.1.8937393" >> $GITHUB_ENV
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+    - name: Install cargo-ndk
+      run: cargo install cargo-ndk
+
+    - name: Cache cargo registry and build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
+    - name: Build Native Rust Library
+      run: ./tools/build-rust-android.sh
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Build Android APK
+      run: ./gradlew assembleDebug
+
+    - name: Verify APK Native Binaries and Build ID
+      run: |
+        unzip -q app/build/outputs/apk/debug/app-debug.apk -d apk_extracted
+        echo "Validating freshly built SHA-256 against packaged APK SHA-256"
+        
+        for abi in arm64-v8a armeabi-v7a x86_64; do
+          ORIG=$(sha256sum app/src/main/jniLibs/$abi/libadblock_rust.so | awk '{print $1}')
+          PACKAGED=$(sha256sum apk_extracted/lib/$abi/libadblock_rust.so | awk '{print $1}')
+          echo "$abi original: $ORIG"
+          echo "$abi packaged: $PACKAGED"
+          if [ "$ORIG" != "$PACKAGED" ]; then
+            echo "Mismatch detected for $abi!"
+            exit 1
+          fi
+        done
+        echo "All packaged binaries match the freshly built native libraries."
+
+    - name: Stale Binary Protection
+      run: |
+        # If the generated binaries differ from the checked-in binaries, it means the developer
+        # changed the Rust source but forgot to check in the newly compiled .so files.
+        # We fail the build HERE after proving the pipeline works, so they don't merge stale bins.
+        if ! git diff --exit-code app/src/main/jniLibs/; then
+          echo "ERROR: Checked-in native binaries (libadblock_rust.so) are stale!"
+          echo "Please run ./tools/build-rust-android.sh locally and commit the fresh binaries."
+          exit 1
+        fi
+
+    - name: Run Unit Tests
+      run: ./gradlew testDebugUnitTest
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/app-debug.apk

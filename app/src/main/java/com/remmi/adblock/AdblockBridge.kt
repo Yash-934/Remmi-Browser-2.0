@@ -117,6 +117,17 @@ class AdblockBridge {
       Log.d(TAG, "[ADBLOCK_RULES] total=$totalRules")
 
       if (isNativeLoaded) {
+                try {
+          val engineVer = nativeGetVersion()
+          val buildId = nativeGetBuildId()
+          val abi = nativeGetAbi()
+          Log.i(TAG, "[ADBLOCK_NATIVE_BINARY]")
+          Log.i(TAG, "version=$engineVer")
+          Log.i(TAG, "build=$buildId")
+          Log.i(TAG, "abi=$abi")
+        } catch (e: Throwable) {
+          Log.e(TAG, "[ADBLOCK_NATIVE_BINARY] Could not read build info: ${e.message}")
+        }
         val testOk = selfTest()
         if (testOk) {
           state = AdblockState.READY
@@ -639,6 +650,8 @@ class AdblockBridge {
   private external fun nativeGetEngineGeneration(): Long
   private external fun nativeSelfTest(): Boolean
   private external fun nativeGetVersion(): String
+  private external fun nativeGetBuildId(): String
+  private external fun nativeGetAbi(): String
 
   companion object {
     private const val TAG = "AdblockBridge"
