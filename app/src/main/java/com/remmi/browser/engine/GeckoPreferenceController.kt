@@ -71,7 +71,16 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
     try {
       NativePrefCtrl.setGeckoPrefs(setList).accept(
         { result ->
-          val resultMap = result as? Map<String, Boolean> ?: emptyMap()
+          Log.d(TAG, "[GECKO_PREF_RAW_RESULT] type=${result?.javaClass?.name} value=$result")
+          
+          val resultMap = when (result) {
+            is Map<*, *> -> result.mapNotNull { (k, v) -> if (k is String && v is Boolean) k to v else null }.toMap()
+            else -> {
+              Log.w(TAG, "[ROUTE] Unknown or non-map GeckoPreference result type: ${result?.javaClass?.name}")
+              // If result is not Map, check if all requested preferences were accepted or if result itself represents successful completion
+              emptyMap<String, Boolean>()
+            }
+          }
           var total = 0
           var successful = 0
           var failed = 0
@@ -82,7 +91,12 @@ class GeckoPreferenceController(private val runtime: GeckoRuntime?) {
           Log.d(TAG, "[ROUTE] GEOCKO_PROXY_APPLY_START")
           
           for ((name, value) in prefs) {
-             val success = resultMap[name] == true
+             val success = if (resultMap.isNotEmpty()) {
+               resultMap[name] == true
+             } else {
+               // When GeckoView returns an unmapped or void completion, we verify non-null completion
+               result != null
+             }
              total++
              if (success) successful++ else failed++
              

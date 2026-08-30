@@ -149,10 +149,9 @@ browser.webRequest.onBeforeRequest.addListener(
         return { cancel: true };
       }
     } catch (e) {
-      logToNative(`[WEBEXT] SHOULD_BLOCK failed type=${details.type} error=${String(e)}`);
-      console.error("[Remmi] Native blocker failed:", details.type, details.url, e);
-      // Temporarily fail-open to diagnose Ghost mode resource loading
-      return { cancel: false };
+      logToNative(`[WEBEXT] SHOULD_BLOCK failed type=${details.type}`);
+      // Fail-closed invariant: block on native bridge error to prevent data leak in secure profiles
+      return { cancel: true };
     }
     
     return { cancel: false };

@@ -26,6 +26,10 @@ object NetworkHardening {
     settings: com.remmi.browser.storage.BrowserSettings? = null
   ): Map<String, Any> {
     require(torPort != null && torPort > 0) { "Valid Tor SOCKS port required (received $torPort)" }
+    return getMandatoryTorRoutingPreferences(torPort) + getHardenedPrivacyPreferences(settings)
+  }
+
+  fun getMandatoryTorRoutingPreferences(torPort: Int): Map<String, Any> {
     return mapOf(
       "network.proxy.type" to 1,
       "network.proxy.socks" to "127.0.0.1",
@@ -36,6 +40,11 @@ object NetworkHardening {
       "network.proxy.failover_direct" to false, // CRITICAL: zero clearnet leak
       "network.proxy.allow_bypass" to false,
       "network.proxy.no_proxies_on" to "",
+    )
+  }
+
+  fun getHardenedPrivacyPreferences(settings: com.remmi.browser.storage.BrowserSettings? = null): Map<String, Any> {
+    return mapOf(
       "network.trr.mode" to 5, // TRR disabled in Ghost mode: all DNS routed via Tor remote DNS
       "media.peerconnection.enabled" to false, // WebRTC completely blocked
       "media.peerconnection.ice.proxy_only" to true,

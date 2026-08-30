@@ -96,6 +96,7 @@ class PrivacyNetworkController private constructor(private val context: Context)
     val routingOk = TorStatusChecker.verifyTorRouting(socksPort)
     if (!routingOk.isTor) {
       val err = IllegalStateException("Tor exit verification failed on port $socksPort")
+      torManager.stopTor()
       CurrentTorRoute.clearRoute()
       DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=tor_exit_failed")
       return@withContext Result.failure(err)
@@ -107,8 +108,9 @@ class PrivacyNetworkController private constructor(private val context: Context)
     val proxyApplied = NetworkHardening.applyTorNetworkSettings(geckoEngine.runtime, socksPort, generation)
     if (!proxyApplied) {
       val err = IllegalStateException("Failed to apply Gecko native Tor proxy preferences")
+      torManager.stopTor()
       CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
+      NetworkHardening.resetAppliedState()
       DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=gecko_proxy_failed")
       return@withContext Result.failure(err)
     }
@@ -132,8 +134,9 @@ class PrivacyNetworkController private constructor(private val context: Context)
     
     if (!geckoVerified) {
       val err = IllegalStateException("Gecko native Tor proxy verification failed (not routing through Tor)")
+      torManager.stopTor()
       CurrentTorRoute.clearRoute()
-            NetworkHardening.resetAppliedState()
+      NetworkHardening.resetAppliedState()
       DebugLogManager.log("[ROUTE] FAILED profile=GHOST reason=gecko_verification_failed")
       return@withContext Result.failure(err)
     }
