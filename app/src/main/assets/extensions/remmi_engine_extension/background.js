@@ -87,12 +87,16 @@ function connectNative() {
     port.onMessage.addListener((msg) => {
       if (!msg) return;
       if (msg.type === "CLEAR_CACHE" || msg.type === "RULES_UPDATED") {
+        rulesGeneration++;
         DECISION_CACHE.clear();
-        console.log("[Remmi] Decision cache cleared on rules/profile update");
+        INFLIGHT_DECISIONS.clear();
+        console.log(`[Remmi] Decision cache cleared on rules/profile update (gen=${rulesGeneration})`);
       } else if (msg.type === "PROFILE_CHANGED") {
         currentProfile = msg.profile || "SHIELD";
+        rulesGeneration++;
         DECISION_CACHE.clear();
-        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision cache`);
+        INFLIGHT_DECISIONS.clear();
+        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision cache (gen=${rulesGeneration})`);
       } else if (msg.type === "EXTRACT_HTML") {
         const requestId = msg.requestId;
         const tabId = msg.tabId;
@@ -177,6 +181,7 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // 2. Delegate network requests to Native Engine with fast-path filtering and LRU decision caching
 let currentProfile = "SHIELD";
+let rulesGeneration = 0;
 const DECISION_CACHE = new Map();
 const INFLIGHT_DECISIONS = new Map();
 
@@ -259,6 +264,7 @@ function buildDecisionKey(details) {
 
   return [
     currentProfile,
+    rulesGeneration,
     method,
     resType,
     origin,

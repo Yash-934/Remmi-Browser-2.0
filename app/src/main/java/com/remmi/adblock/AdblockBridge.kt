@@ -4,7 +4,21 @@ import android.util.Log
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+
+enum class AdblockState {
+  STARTING,
+  READY,
+  DEGRADED,
+  FAILED
+}
+
+data class BlockDecision(
+  val blocked: Boolean,
+  val ruleId: String? = null,
+  val ruleSource: String? = null
+)
 
 /**
  * Remmi Adblock Bridge
@@ -20,9 +34,16 @@ class AdblockBridge {
   var isNativeLoaded: Boolean = false
     private set
 
+  var state: AdblockState = AdblockState.STARTING
+    private set
+
+  private val initialized = AtomicBoolean(false)
+
   init {
     initEngine()
   }
+
+  fun isNativeAvailable(): Boolean = isNativeLoaded
 
   private fun initEngine() {
     try {
@@ -30,17 +51,21 @@ class AdblockBridge {
       val initSuccess = nativeInit()
       if (initSuccess) {
         isNativeLoaded = true
+        state = AdblockState.READY
         Log.i(TAG, "Native adblock_rust loaded and initialized successfully!")
       } else {
         isNativeLoaded = false
+        state = AdblockState.DEGRADED
         Log.w(TAG, "Native adblock_rust library loaded but nativeInit returned false. Using Kotlin fallback engine.")
       }
     } catch (e: UnsatisfiedLinkError) {
       Log.w(TAG, "libadblock_rust.so not found or signature mismatch. Using Kotlin fallback engine.", e)
       isNativeLoaded = false
+      state = AdblockState.DEGRADED
     } catch (e: Throwable) {
       Log.w(TAG, "Failed initializing native adblock engine, falling back to Kotlin engine", e)
       isNativeLoaded = false
+      state = AdblockState.DEGRADED
     }
 
     loadDefaultTrackerRules()
@@ -50,22 +75,57 @@ class AdblockBridge {
     }
   }
 
+  suspend fun initialize(): Boolean {
+    if (initialized.get()) {
+      return true
+    }
+
+    return try {
+      Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
+      loadDefaultTrackerRules()
+
+      val totalRules = getLoadedRulesCount()
+      Log.d(TAG, "[ADBLOCK_RULES] total=$totalRules")
+
+      if (isNativeLoaded) {
+        val testOk = selfTest()
+        if (testOk) {
+          state = AdblockState.READY
+          Log.d(TAG, "[ADBLOCK_READY] native=true")
+        } else {
+          state = AdblockState.DEGRADED
+          Log.w(TAG, "[ADBLOCK_READY] native=false (degraded)")
+        }
+      } else {
+        state = AdblockState.DEGRADED
+        Log.i(TAG, "[ADBLOCK_READY] native=false (fallback engine active)")
+      }
+
+      initialized.set(true)
+      true
+    } catch (t: Throwable) {
+      state = AdblockState.FAILED
+      Log.e(TAG, "[ADBLOCK_INIT_FAILED]", t)
+      false
+    }
+  }
+
   fun selfTest(): Boolean {
     if (!isNativeLoaded) {
-      Log.d(TAG, "[ADBLOCK_SELF_TEST] native not loaded (using Kotlin fallback)")
+      Log.w(TAG, "[ADBLOCK_SELF_TEST] native_not_loaded (using Kotlin fallback engine)")
       return false
     }
 
     return try {
-      val result = nativeMatches(
-        "https://example.com/test.js",
+      val blocked = nativeMatches(
+        "https://ads.example.com/banner.js",
         "https://example.com/",
         "script"
       )
-      Log.d(TAG, "[ADBLOCK_SELF_TEST] result=$result")
+      Log.d(TAG, "[ADBLOCK_SELF_TEST] native=true result=$blocked")
       true
     } catch (t: Throwable) {
-      Log.e(TAG, "[ADBLOCK_SELF_TEST] failed", t)
+      Log.e(TAG, "[ADBLOCK_SELF_TEST] native_failed", t)
       false
     }
   }
@@ -122,6 +182,7 @@ class AdblockBridge {
   }
 
   fun compileRules(rulesText: String): Int {
+    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_START] textLength=${rulesText.length}")
     var compiledCount = 0
     if (isNativeLoaded) {
       try {
@@ -177,10 +238,15 @@ class AdblockBridge {
         if (!isNativeLoaded) compiledCount++
       }
     }
+    Log.d(TAG, "[ADBLOCK_FILTER_COMPILE_DONE] compiled=$compiledCount total=${getLoadedRulesCount()}")
     return compiledCount
   }
 
   fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean {
+    return evaluateDecision(url, sourceUrl, resourceType).blocked
+  }
+
+  fun evaluateDecision(url: String, sourceUrl: String = "", resourceType: String = "other"): BlockDecision {
     val startNs = System.nanoTime()
     try {
       if (isNativeLoaded) {
@@ -189,30 +255,37 @@ class AdblockBridge {
           if (blocked) {
             totalBlockedCount.incrementAndGet()
             logSlowDecisionIfNeeded(startNs, resourceType)
-            return true
+            return BlockDecision(blocked = true, ruleId = "native", ruleSource = "RustEngine")
           }
-        } catch (e: Throwable) {
-          Log.e(TAG, "[ADBLOCK_NATIVE_MATCH_ERROR] nativeMatches failed for url=$url type=$resourceType", e)
-          throw e
+        } catch (t: Throwable) {
+          state = AdblockState.DEGRADED
+          Log.e(TAG, "[ADBLOCK_DECISION_ERROR] ${t.javaClass.name}: ${t.message}", t)
+          throw t
         }
       }
 
-      val uri = URI(url)
+      val uri = try {
+        URI(url)
+      } catch (e: Exception) {
+        Log.e(TAG, "[ADBLOCK_DECISION_ERROR] invalid_url: $url", e)
+        throw e
+      }
+
       val host = uri.host?.lowercase() ?: run {
         logSlowDecisionIfNeeded(startNs, resourceType)
-        return false
+        return BlockDecision(blocked = false, ruleId = "invalid_host", ruleSource = "KotlinFallback")
       }
 
       if (allowList.any { rule -> host == rule || host.endsWith(".$rule") }) {
         logSlowDecisionIfNeeded(startNs, resourceType)
-        return false
+        return BlockDecision(blocked = false, ruleId = "allowlist", ruleSource = "KotlinFallback")
       }
 
       for (blockedHost in blockedHostnames) {
         if (host == blockedHost || host.endsWith(".$blockedHost")) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
-          return true
+          return BlockDecision(blocked = true, ruleId = "host:$blockedHost", ruleSource = "KotlinFallback")
         }
       }
 
@@ -221,15 +294,15 @@ class AdblockBridge {
         if (lowerUrl.contains(pattern)) {
           totalBlockedCount.incrementAndGet()
           logSlowDecisionIfNeeded(startNs, resourceType)
-          return true
+          return BlockDecision(blocked = true, ruleId = "pattern:$pattern", ruleSource = "KotlinFallback")
         }
       }
 
       logSlowDecisionIfNeeded(startNs, resourceType)
-      return false
-    } catch (e: Exception) {
-      Log.e(TAG, "[ADBLOCK_MATCH_ERROR] shouldBlock failed for url=$url", e)
-      throw e
+      return BlockDecision(blocked = false, ruleId = "none", ruleSource = "KotlinFallback")
+    } catch (t: Throwable) {
+      Log.e(TAG, "[ADBLOCK_DECISION_ERROR] ${t.javaClass.name}: ${t.message}", t)
+      throw t
     }
   }
 

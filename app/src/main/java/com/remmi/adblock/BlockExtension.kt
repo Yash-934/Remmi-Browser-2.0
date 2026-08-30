@@ -201,10 +201,10 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
         } catch (_: Exception) { null }
         val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
 
-        val blocked = if (bypass) {
-          false
+        val decision = if (bypass) {
+          BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
         } else {
-          adblockBridge.shouldBlock(
+          adblockBridge.evaluateDecision(
             url = url,
             sourceUrl = sourceUrl,
             resourceType = resourceType
@@ -213,13 +213,15 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
         Log.d(
           TAG,
-          "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=$blocked bypass=$bypass"
+          "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=${decision.blocked} bypass=$bypass rule=${decision.ruleId} src=${decision.ruleSource}"
         )
 
         result.complete(
           JSONObject().apply {
             put("ok", true)
-            put("cancel", blocked)
+            put("cancel", decision.blocked)
+            if (decision.ruleId != null) put("ruleId", decision.ruleId)
+            if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
           }
         )
 
