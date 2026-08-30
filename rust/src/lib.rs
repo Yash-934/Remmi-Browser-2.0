@@ -247,6 +247,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
     classes: JString,
     ids: JString,
     exceptions: JString,
+    aggressive: jboolean,
 ) -> jstring {
     let gen = GLOBAL_STATE.generation.load(Ordering::Relaxed);
     let url_str: String = match env.get_string(&url) {
@@ -333,30 +334,33 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
     if let Some(ref engine) = *default_guard {
         let cosmetic_resources = engine.url_cosmetic_resources(&url_str);
         hide_selectors.extend(cosmetic_resources.hide_selectors);
-        force_hide_selectors.extend(cosmetic_resources.force_hide_selectors);
+        
         if is_aggressive {
-            procedural.extend(cosmetic_resources.injected_script);
+            if !cosmetic_resources.injected_script.is_empty() {
+                procedural.insert(cosmetic_resources.injected_script);
+            }
         }
-        generics = generics || cosmetic_resources.generics;
+        generics = generics || cosmetic_resources.generichide;
 
         if !classes_vec.is_empty() || !ids_vec.is_empty() {
             let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-            hide_selectors.extend(hidden.hide_selectors);
+            hide_selectors.extend(hidden);
         }
     }
 
     if let Some(guard) = additional_guard {
         if let Some(ref engine) = *guard {
             let cosmetic_resources = engine.url_cosmetic_resources(&url_str);
-            // Brave wraps additional cosmetic selectors as force_hide
             force_hide_selectors.extend(cosmetic_resources.hide_selectors);
-            force_hide_selectors.extend(cosmetic_resources.force_hide_selectors);
-            procedural.extend(cosmetic_resources.injected_script);
-            generics = generics || cosmetic_resources.generics;
+            
+            if !cosmetic_resources.injected_script.is_empty() {
+                procedural.insert(cosmetic_resources.injected_script);
+            }
+            generics = generics || cosmetic_resources.generichide;
 
             if !classes_vec.is_empty() || !ids_vec.is_empty() {
                 let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-                force_hide_selectors.extend(hidden.hide_selectors);
+                force_hide_selectors.extend(hidden);
             }
         }
     }
@@ -385,6 +389,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
     classes: JString,
     ids: JString,
     exceptions: JString,
+    aggressive: jboolean,
 ) -> jstring {
     let gen = GLOBAL_STATE.generation.load(Ordering::Relaxed);
     let classes_str: String = match env.get_string(&classes) {
@@ -545,18 +550,20 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetVersion(
 pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetBuildId(
     env: JNIEnv,
     _class: JClass,
-) -> JString {
+) -> jstring {
     let build_id = option_env!("NATIVE_BUILD_ID").unwrap_or("unknown");
-    env.new_string(build_id).unwrap_or_else(|_| env.new_string("").unwrap())
+    let output = env.new_string(build_id).unwrap_or_else(|_| env.new_string("").unwrap());
+    output.into_raw()
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetAbi(
     env: JNIEnv,
     _class: JClass,
-) -> JString {
+) -> jstring {
     let abi = option_env!("NATIVE_BUILD_ABI").unwrap_or("unknown");
-    env.new_string(abi).unwrap_or_else(|_| env.new_string("").unwrap())
+    let output = env.new_string(abi).unwrap_or_else(|_| env.new_string("").unwrap());
+    output.into_raw()
 }
 
 #[cfg(test)]
