@@ -389,7 +389,6 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
     classes: JString,
     ids: JString,
     exceptions: JString,
-    aggressive: jboolean,
 ) -> jstring {
     let gen = GLOBAL_STATE.generation.load(Ordering::Relaxed);
     let classes_str: String = match env.get_string(&classes) {

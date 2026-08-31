@@ -56,13 +56,9 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
-    val isBuildingBundle = gradle.startParameter.taskNames.any { it.contains("bundle", ignoreCase = true) }
     splits {
       abi {
-        isEnable = !isBuildingBundle
-        reset()
-        include("arm64-v8a", "armeabi-v7a")
-        isUniversalApk = false
+        isEnable = false
       }
     }
 

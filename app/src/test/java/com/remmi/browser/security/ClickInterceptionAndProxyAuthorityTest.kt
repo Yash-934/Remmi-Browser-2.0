@@ -17,7 +17,7 @@ import org.robolectric.annotation.Config
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class ClickInterceptionAndProxyAuthorityTest {
 
   // Test 1: Normal link -> intercepted=false, opens immediately

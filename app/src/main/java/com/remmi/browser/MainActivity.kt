@@ -71,14 +71,24 @@ class MainActivity : FragmentActivity() {
           try {
             Thread.sleep(1000)
             if (!responded.get()) {
-              val geckoState = com.remmi.browser.engine.GeckoEngineManager.getInstance(applicationContext).initState.value.name
+              val geckoState = try {
+                com.remmi.browser.engine.GeckoEngineManager.getInstance(applicationContext).initState.value.name
+              } catch (_: Throwable) {
+                "UNINITIALIZED"
+              }
               android.util.Log.e("ANR_WATCHDOG", "Main thread blocked for >1s! GeckoState=$geckoState, Thread=${Thread.currentThread().name}")
             }
           } catch (e: InterruptedException) {
             break
+          } catch (_: Throwable) {
+            // Guard against any unhandled exception in watchdog loop
           }
         }
-      }.apply { start() }
+      }.apply {
+        name = "Remmi-Watchdog"
+        isDaemon = true
+        start()
+      }
     }
 
     super.onCreate(savedInstanceState)

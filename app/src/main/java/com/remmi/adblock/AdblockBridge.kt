@@ -571,7 +571,11 @@ class AdblockBridge {
         )
       }
 
-      if (allowList.any { rule -> host == rule || host.endsWith(".$rule") }) {
+      val lowerUrl = url.lowercase()
+      if (allowList.any { rule ->
+        val cleanRule = rule.lowercase()
+        host == cleanRule || host.endsWith(".$cleanRule") || lowerUrl.contains(cleanRule)
+      }) {
         logSlowDecisionIfNeeded(startNs, resourceType)
         return BlockDecision(
           blocked = false,
@@ -594,7 +598,6 @@ class AdblockBridge {
         }
       }
 
-      val lowerUrl = url.lowercase()
       for (pattern in blockedSubstrings) {
         if (lowerUrl.contains(pattern)) {
           totalBlockedCount.incrementAndGet()
