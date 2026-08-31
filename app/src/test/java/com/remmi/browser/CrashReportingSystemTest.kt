@@ -26,6 +26,7 @@ class CrashReportingSystemTest {
   @Before
   fun setup() {
     context = ApplicationProvider.getApplicationContext()
+    Thread.sleep(1000) // Let background initialization finish so it doesn't concurrently mutate state
     context.getSharedPreferences(CrashHandlerHelper.PREFS_NAME, Context.MODE_PRIVATE)
       .edit()
       .clear()
@@ -104,6 +105,7 @@ class CrashReportingSystemTest {
     assertNotNull(report)
     assertTrue(report!!.contains("Report Type:\nABNORMAL_TERMINATION"))
     assertTrue(report.contains("NO JAVA EXCEPTION CAPTURED."))
+    println("REPORT_IS: " + report)
     assertTrue(report.contains("Last startup phase: ADBLOCK_CONSTRUCTION_START"))
     assertTrue(report.contains("Startup session ID: dead-session-999"))
 

@@ -28,6 +28,7 @@ class StartupIsolationMatrixTest {
   @Before
   fun setup() {
     context = ApplicationProvider.getApplicationContext()
+    Thread.sleep(1000) // Let background initialization finish so it doesn't concurrently mutate state
     context.getSharedPreferences(CrashHandlerHelper.PREFS_NAME, Context.MODE_PRIVATE)
       .edit()
       .clear()
@@ -35,6 +36,7 @@ class StartupIsolationMatrixTest {
     DebugLogManager.init(context)
     DebugLogManager.clear()
     SqlCipherInitializer.resetForTesting()
+    CrashHandlerHelper.updateStartupPhase(phase = StartupPhase.PROCESS_START)
   }
 
   @Test
