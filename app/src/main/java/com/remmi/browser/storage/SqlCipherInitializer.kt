@@ -1,5 +1,6 @@
 package com.remmi.browser.storage
 
+import android.content.Context
 import android.util.Log
 import com.remmi.browser.util.CrashHandlerHelper
 import com.remmi.browser.util.DebugLogManager
@@ -48,6 +49,15 @@ object SqlCipherInitializer {
         synchronized(this) {
             loaded = forceLoaded ?: false
             loadFailed = forceFailed ?: false
+        }
+    }
+
+    fun simulateLoadFailureForTesting(context: Context? = null) {
+        synchronized(this) {
+            loaded = false
+            loadFailed = true
+            CrashHandlerHelper.updateStartupPhase(context, StartupPhase.SQLCIPHER_LOAD_FAILED)
+            DebugLogManager.log("[SQLCIPHER_LOAD_FAILED] Simulated test failure")
         }
     }
 }
