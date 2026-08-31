@@ -70,6 +70,7 @@ android {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
     jniLibs {
+      keepDebugSymbols.add("**/libadblock_rust.so")
     }
   }
   compileOptions {
