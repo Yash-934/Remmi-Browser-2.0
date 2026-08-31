@@ -53,6 +53,21 @@ class AdblockBridge {
   var isNativeLoaded: Boolean = false
     private set
 
+  var nativeBuildId: String = "unknown"
+    private set
+
+  var nativeAbi: String = "unknown"
+    private set
+
+  var nativeApiVersion: String = "unknown"
+    private set
+
+  var isNativeHiddenClassIdCompatible: Boolean = false
+    private set
+
+  var isJniSignatureCompatible: Boolean = false
+    private set
+
   var state: AdblockState = AdblockState.STARTING
     private set
 
@@ -63,6 +78,29 @@ class AdblockBridge {
   }
 
   fun isNativeAvailable(): Boolean = isNativeLoaded
+
+  fun verifyNativeCompatibility(version: String, buildId: String, abi: String): Boolean {
+    // Current Kotlin declares 3-argument nativeGetHiddenClassIdSelectors(classes, ids, exceptions).
+    // Prebuilt .so binaries (version "adblock-rust-0.8.0-remmi" or legacy 0.8.0) contain the legacy 4-argument signature.
+    // Fresh native .so rebuild (version >= "adblock-rust-0.8.1-remmi" or build flag "v2-compat") enables the 3-argument signature.
+    // Old 0.8.0 binaries remain strictly gated (returning false) so the app does not call the incompatible JNI method.
+    if (version.startsWith("adblock-rust-0.8.0")) {
+      return buildId.contains("v2-compat")
+    }
+    return (version.startsWith("adblock-rust-0.8.1") ||
+            version.startsWith("adblock-rust-0.8.2") ||
+            version.startsWith("adblock-rust-0.9") ||
+            version.startsWith("adblock-rust-1.") ||
+            buildId.contains("v2-compat"))
+  }
+
+  private fun logNativeCompatDiagnostic(compatible: Boolean) {
+    Log.i(TAG, "[ADBLOCK_NATIVE_COMPAT]")
+    Log.i(TAG, "compatible=$compatible")
+    Log.i(TAG, "buildId=$nativeBuildId")
+    Log.i(TAG, "abi=$nativeAbi")
+    Log.i(TAG, "apiVersion=$nativeApiVersion")
+  }
 
   fun getEngineGeneration(): Long {
     if (isNativeLoaded) {
@@ -82,19 +120,37 @@ class AdblockBridge {
         isNativeLoaded = true
         state = AdblockState.READY
         Log.i(TAG, "Native adblock_rust loaded and initialized successfully!")
+
+        try {
+          nativeApiVersion = nativeGetVersion()
+        } catch (_: Throwable) { nativeApiVersion = "unknown" }
+        try {
+          nativeBuildId = nativeGetBuildId()
+        } catch (_: Throwable) { nativeBuildId = "unknown" }
+        try {
+          nativeAbi = nativeGetAbi()
+        } catch (_: Throwable) { nativeAbi = "unknown" }
+
+        isJniSignatureCompatible = verifyNativeCompatibility(nativeApiVersion, nativeBuildId, nativeAbi)
+        isNativeHiddenClassIdCompatible = isJniSignatureCompatible
+
+        logNativeCompatDiagnostic(isJniSignatureCompatible)
       } else {
         isNativeLoaded = false
         state = AdblockState.DEGRADED
         Log.w(TAG, "Native adblock_rust library loaded but nativeInit returned false. Using Kotlin fallback engine.")
+        logNativeCompatDiagnostic(false)
       }
     } catch (e: UnsatisfiedLinkError) {
       Log.w(TAG, "libadblock_rust.so not found or signature mismatch. Using Kotlin fallback engine.", e)
       isNativeLoaded = false
       state = AdblockState.DEGRADED
+      logNativeCompatDiagnostic(false)
     } catch (e: Throwable) {
       Log.w(TAG, "Failed initializing native adblock engine, falling back to Kotlin engine", e)
       isNativeLoaded = false
       state = AdblockState.DEGRADED
+      logNativeCompatDiagnostic(false)
     }
 
     loadDefaultTrackerRules()
@@ -117,17 +173,7 @@ class AdblockBridge {
       Log.d(TAG, "[ADBLOCK_RULES] total=$totalRules")
 
       if (isNativeLoaded) {
-                try {
-          val engineVer = nativeGetVersion()
-          val buildId = nativeGetBuildId()
-          val abi = nativeGetAbi()
-          Log.i(TAG, "[ADBLOCK_NATIVE_BINARY]")
-          Log.i(TAG, "version=$engineVer")
-          Log.i(TAG, "build=$buildId")
-          Log.i(TAG, "abi=$abi")
-        } catch (e: Throwable) {
-          Log.e(TAG, "[ADBLOCK_NATIVE_BINARY] Could not read build info: ${e.message}")
-        }
+        logNativeCompatDiagnostic(isJniSignatureCompatible)
         val testOk = selfTest()
         if (testOk) {
           state = AdblockState.READY
@@ -470,7 +516,8 @@ class AdblockBridge {
     exceptions: List<String> = emptyList()
   ): CosmeticResources {
     val currentGen = getEngineGeneration()
-    if (isNativeLoaded) {
+    // Gated: NEVER invoke nativeGetHiddenClassIdSelectors unless native binary is proven compatible (requires fresh .so rebuild)
+    if (isNativeLoaded && isNativeHiddenClassIdCompatible) {
       try {
         val classesJson = org.json.JSONArray(classes).toString()
         val idsJson = org.json.JSONArray(ids).toString()

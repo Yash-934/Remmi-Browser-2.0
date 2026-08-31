@@ -539,7 +539,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetVersion(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let version = "adblock-rust-0.8.0-remmi";
+    let version = "adblock-rust-0.8.1-remmi";
     let output = env.new_string(version).expect("Couldn't create java string!");
     output.into_raw()
 }
