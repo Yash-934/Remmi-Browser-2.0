@@ -25,10 +25,16 @@ android {
 
   signingConfigs {
     create("release") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      val keystorePath = System.getenv("KEYSTORE_PATH")
+      if (!keystorePath.isNullOrEmpty()) {
+        val ksFile = file(keystorePath)
+        if (ksFile.exists()) {
+          storeFile = ksFile
+          storePassword = System.getenv("STORE_PASSWORD")
+          keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+          keyPassword = System.getenv("KEY_PASSWORD")
+        }
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -37,6 +43,7 @@ android {
       keyPassword = "android"
     }
   }
+
   buildTypes {
     release {
       isCrunchPngs = false
@@ -51,10 +58,10 @@ android {
   }
   splits {
     abi {
-      isEnable = true
+      isEnable = false
       reset()
       include("arm64-v8a", "armeabi-v7a")
-      isUniversalApk = false
+      isUniversalApk = true
     }
   }
 
