@@ -179,6 +179,9 @@ class AdblockBridge {
   }
 
   fun loadDefaultTrackerRules() {
+    allowList.clear()
+    fallbackCosmeticExceptions.clear()
+
     val defaultDomains = listOf(
       "doubleclick.net", "googlesyndication.com", "google-analytics.com",
       "googletagmanager.com", "adservice.google.com", "admob.com",
@@ -221,10 +224,12 @@ class AdblockBridge {
   fun addCustomRule(rule: String) {
     val trimmed = rule.trim()
     if (trimmed.startsWith("@@")) {
-      allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
+      val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
+      if (clean.isNotEmpty()) allowList.add(clean)
     } else if (trimmed.startsWith("||")) {
-      blockedHostnames.add(trimmed.removePrefix("||").removeSuffix("^"))
-    } else {
+      val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
+      if (clean.isNotEmpty()) blockedHostnames.add(clean)
+    } else if (trimmed.isNotEmpty()) {
       blockedSubstrings.add(trimmed)
     }
   }
@@ -320,9 +325,11 @@ class AdblockBridge {
               else fallbackCosmeticRules.add(Pair(domain, selector))
             }
           } else if (trimmed.startsWith("@@")) {
-            allowList.add(trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^"))
+            val clean = trimmed.removePrefix("@@").removePrefix("||").removeSuffix("^").trim()
+            if (clean.isNotEmpty()) allowList.add(clean)
           } else if (trimmed.startsWith("||")) {
-            blockedHostnames.add(trimmed.removePrefix("||").removeSuffix("^"))
+            val clean = trimmed.removePrefix("||").removeSuffix("^").trim()
+            if (clean.isNotEmpty()) blockedHostnames.add(clean)
           } else {
             blockedSubstrings.add(trimmed)
           }
@@ -573,8 +580,8 @@ class AdblockBridge {
 
       val lowerUrl = url.lowercase()
       if (allowList.any { rule ->
-        val cleanRule = rule.lowercase()
-        host == cleanRule || host.endsWith(".$cleanRule") || lowerUrl.contains(cleanRule)
+        val cleanRule = rule.lowercase().trim()
+        cleanRule.isNotEmpty() && (host == cleanRule || host.endsWith(".$cleanRule") || (cleanRule.length > 2 && lowerUrl.contains(cleanRule)))
       }) {
         logSlowDecisionIfNeeded(startNs, resourceType)
         return BlockDecision(

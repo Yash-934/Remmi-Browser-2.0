@@ -47,49 +47,9 @@ enum class ScreenRoute {
 
 class MainActivity : FragmentActivity() {
 
-  private var watchdogThread: Thread? = null
-
   override fun onCreate(savedInstanceState: Bundle?) {
     val startTime = android.os.SystemClock.elapsedRealtime()
     android.util.Log.i("AppStartup", "STATE_LOG: APP_START (time=$startTime)")
-
-    if (com.remmi.browser.BuildConfig.DEBUG) {
-      android.os.StrictMode.setThreadPolicy(
-        android.os.StrictMode.ThreadPolicy.Builder()
-          .detectDiskReads()
-          .detectDiskWrites()
-          .detectNetwork()
-          .penaltyLog()
-          .build()
-      )
-      
-      watchdogThread = Thread {
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        while (!Thread.currentThread().isInterrupted) {
-          val responded = java.util.concurrent.atomic.AtomicBoolean(false)
-          handler.post { responded.set(true) }
-          try {
-            Thread.sleep(1000)
-            if (!responded.get()) {
-              val geckoState = try {
-                com.remmi.browser.engine.GeckoEngineManager.getInstance(applicationContext).initState.value.name
-              } catch (_: Throwable) {
-                "UNINITIALIZED"
-              }
-              android.util.Log.e("ANR_WATCHDOG", "Main thread blocked for >1s! GeckoState=$geckoState, Thread=${Thread.currentThread().name}")
-            }
-          } catch (e: InterruptedException) {
-            break
-          } catch (_: Throwable) {
-            // Guard against any unhandled exception in watchdog loop
-          }
-        }
-      }.apply {
-        name = "Remmi-Watchdog"
-        isDaemon = true
-        start()
-      }
-    }
 
     super.onCreate(savedInstanceState)
 
@@ -234,7 +194,6 @@ class MainActivity : FragmentActivity() {
   }
 
   override fun onDestroy() {
-    watchdogThread?.interrupt()
     super.onDestroy()
   }
 
