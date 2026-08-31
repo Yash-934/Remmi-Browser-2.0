@@ -34,6 +34,7 @@ class StartupIsolationMatrixTest {
       .commit()
     DebugLogManager.init(context)
     DebugLogManager.clear()
+    SqlCipherInitializer.resetForTesting()
   }
 
   @Test
@@ -75,6 +76,7 @@ class StartupIsolationMatrixTest {
     SqlCipherInitializer.simulateLoadFailureForTesting(context)
     val loaded = SqlCipherInitializer.ensureLoaded()
     assertFalse(loaded)
-    assertEquals(StartupPhase.SQLCIPHER_LOAD_FAILED, CrashHandlerHelper.currentPhase)
+    val prefs = context.getSharedPreferences(CrashHandlerHelper.PREFS_NAME, Context.MODE_PRIVATE)
+    assertEquals(StartupPhase.SQLCIPHER_LOAD_FAILED.id, prefs.getString(CrashHandlerHelper.KEY_STARTUP_PHASE, null))
   }
 }

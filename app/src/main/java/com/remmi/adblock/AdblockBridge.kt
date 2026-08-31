@@ -128,25 +128,53 @@ class AdblockBridge {
     try {
       System.loadLibrary("adblock_rust")
       com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_NATIVE_LOAD_OK)
+      
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_NATIVE_INIT_START]")
       val initSuccess = nativeInit()
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = if (initSuccess) "[ADBLOCK_NATIVE_INIT_OK]" else "[ADBLOCK_NATIVE_INIT_FAILED]")
+      
       if (initSuccess) {
         com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_NATIVE_INIT_OK)
         isNativeLoaded = true
         state = AdblockState.READY
         Log.i(TAG, "Native adblock_rust loaded and initialized successfully!")
 
+        // Gate and query getters individually with persistent markers
         try {
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_VERSION_START]")
           nativeApiVersion = nativeGetVersion()
-        } catch (_: Throwable) { nativeApiVersion = "unknown" }
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_VERSION_OK]", apiVersion = nativeApiVersion)
+        } catch (_: Throwable) {
+          nativeApiVersion = "unknown"
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_VERSION_FAILED]")
+        }
+
         try {
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_BUILDID_START]")
           nativeBuildId = nativeGetBuildId()
-        } catch (_: Throwable) { nativeBuildId = "unknown" }
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_BUILDID_OK]", buildId = nativeBuildId)
+        } catch (_: Throwable) {
+          nativeBuildId = "unknown"
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_BUILDID_FAILED]")
+        }
+
         try {
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_ABI_START]")
           nativeAbi = nativeGetAbi()
-        } catch (_: Throwable) { nativeAbi = "unknown" }
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_ABI_OK]", abi = nativeAbi)
+        } catch (_: Throwable) {
+          nativeAbi = "unknown"
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_ABI_FAILED]")
+        }
+
         try {
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_START]")
           nativeNumericApiVersion = nativeGetApiVersion()
-        } catch (_: Throwable) { nativeNumericApiVersion = 0 }
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_OK]")
+        } catch (_: Throwable) {
+          nativeNumericApiVersion = 0
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_FAILED]")
+        }
 
         // Gate using explicit numeric API version: version >= 2 corresponds to 3-argument nativeGetHiddenClassIdSelectors
         isJniSignatureCompatible = (nativeNumericApiVersion >= 2)
@@ -230,13 +258,16 @@ class AdblockBridge {
     }
 
     return try {
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_SELFTEST_START]")
       val ok = nativeSelfTest()
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = if (ok) "[ADBLOCK_SELFTEST_OK]" else "[ADBLOCK_SELFTEST_FAILED]")
       Log.d(TAG, "[ADBLOCK_SELF_TEST] native=true deterministic=$ok")
       if (!ok) {
         Log.e(TAG, "[ADBLOCK_SELF_TEST] deterministic_self_test_failed")
       }
       ok
     } catch (t: Throwable) {
+      com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_SELFTEST_FAILED]")
       Log.e(TAG, "[ADBLOCK_SELF_TEST] native_failed", t)
       false
     }
@@ -287,8 +318,11 @@ class AdblockBridge {
       val rulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
         defaultPatterns.joinToString("\n")
       try {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_START]")
         nativeCompileRules(rulesText, "")
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_OK]")
       } catch (e: Throwable) {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_FAILED]")
         Log.e(TAG, "Failed to compile default rules into native engine", e)
       }
     }
@@ -355,8 +389,11 @@ class AdblockBridge {
     val oldGen = getEngineGeneration()
     if (isNativeLoaded) {
       try {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
         compiledCount = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
       } catch (e: Throwable) {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
         Log.e(TAG, "Native compile rules failed: ${e.message}", e)
       }
     }
@@ -430,7 +467,9 @@ class AdblockBridge {
         val classesJson = org.json.JSONArray(classes).toString()
         val idsJson = org.json.JSONArray(ids).toString()
         val exceptionsJson = org.json.JSONArray(exceptions).toString()
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COSMETIC_START]")
         val resultJson = nativeGetCosmeticResources(url, classesJson, idsJson, exceptionsJson, aggressive)
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COSMETIC_OK]")
         if (resultJson.isNotBlank()) {
           val obj = org.json.JSONObject(resultJson)
           val ok = obj.optBoolean("ok", true)
@@ -472,6 +511,7 @@ class AdblockBridge {
           )
         }
       } catch (t: Throwable) {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COSMETIC_FAILED]")
         Log.e(TAG, "[COSMETIC_ERROR] native cosmetic lookup error: ${t.message}", t)
       }
     }
@@ -549,7 +589,9 @@ class AdblockBridge {
         val classesJson = org.json.JSONArray(classes).toString()
         val idsJson = org.json.JSONArray(ids).toString()
         val exceptionsJson = org.json.JSONArray(exceptions).toString()
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_HIDDEN_SELECTORS_START]")
         val resultJson = nativeGetHiddenClassIdSelectors(classesJson, idsJson, exceptionsJson)
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_HIDDEN_SELECTORS_OK]")
         if (resultJson.isNotBlank()) {
           val obj = org.json.JSONObject(resultJson)
           val ok = obj.optBoolean("ok", true)
@@ -591,6 +633,7 @@ class AdblockBridge {
           )
         }
       } catch (t: Throwable) {
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_HIDDEN_SELECTORS_FAILED]")
         Log.e(TAG, "[COSMETIC_ERROR] native hidden class/id lookup error: ${t.message}", t)
       }
     }

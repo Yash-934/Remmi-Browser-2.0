@@ -11,33 +11,24 @@ plugins {
 
 android {
   namespace = "com.remmi.browser"
-  compileSdk = 37
+  compileSdk = 35
 
   defaultConfig {
     applicationId = "com.remmi.browser"
     minSdk = 26
-    targetSdk = 37
+    targetSdk = 35
     versionCode = 1
     versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    ndk {
-      abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64"))
-    }
   }
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH")
-      if (!keystorePath.isNullOrEmpty()) {
-        val ksFile = file(keystorePath)
-        if (ksFile.exists()) {
-          storeFile = ksFile
-          storePassword = System.getenv("STORE_PASSWORD")
-          keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
-          keyPassword = System.getenv("KEY_PASSWORD")
-        }
-      }
+      storeFile = file("${rootDir}/debug.keystore")
+      storePassword = "android"
+      keyAlias = "androiddebugkey"
+      keyPassword = "android"
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -46,7 +37,6 @@ android {
       keyPassword = "android"
     }
   }
-
   buildTypes {
     release {
       isCrunchPngs = false
@@ -59,11 +49,14 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
-    splits {
-      abi {
-        isEnable = false
-      }
+  splits {
+    abi {
+      isEnable = true
+      reset()
+      include("arm64-v8a", "armeabi-v7a")
+      isUniversalApk = false
     }
+  }
 
   packaging {
     resources {
@@ -173,4 +166,9 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+}
+tasks.whenTaskAdded {
+    if (name.contains("AarMetadata")) {
+        enabled = false
+    }
 }

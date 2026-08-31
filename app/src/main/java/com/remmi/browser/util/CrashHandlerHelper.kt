@@ -68,12 +68,21 @@ object CrashHandlerHelper {
   const val KEY_PENDING_SAVED_PATH = "pending_report_saved_path"
   const val KEY_PENDING_EXPORT_CONFIRMED = "pending_export_confirmed"
 
+  const val KEY_LAST_NATIVE_OP = "last_native_op"
+  const val KEY_NATIVE_API_VERSION = "saved_native_api_version"
+  const val KEY_NATIVE_BUILD_ID = "saved_native_build_id"
+  const val KEY_NATIVE_ABI = "saved_native_abi"
+
   @Volatile
   var currentSessionId: String = "unknown"
     private set
 
   @Volatile
   var currentPhase: StartupPhase = StartupPhase.PROCESS_START
+    private set
+
+  @Volatile
+  var lastNativeOperation: String = "NONE"
     private set
 
   @Volatile
@@ -168,6 +177,36 @@ object CrashHandlerHelper {
       DebugLogManager.flushSynchronously()
     } catch (e: Throwable) {
       Log.e(TAG, "Error updating startup phase: ${e.message}", e)
+    }
+  }
+
+  /**
+   * Synchronously records a native operation marker into persistent preferences and the debug journal.
+   * Ensures that if an uncatchable native process crash/abort occurs, the exact operation is captured.
+   */
+  fun recordNativeOp(
+    context: Context? = null,
+    op: String,
+    apiVersion: String? = null,
+    buildId: String? = null,
+    abi: String? = null
+  ) {
+    try {
+      lastNativeOperation = op
+      val ctx = context?.applicationContext ?: appContext
+      if (ctx != null) {
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit().putString(KEY_LAST_NATIVE_OP, op)
+        if (apiVersion != null) editor.putString(KEY_NATIVE_API_VERSION, apiVersion)
+        if (buildId != null) editor.putString(KEY_NATIVE_BUILD_ID, buildId)
+        if (abi != null) editor.putString(KEY_NATIVE_ABI, abi)
+        editor.commit()
+      }
+
+      DebugLogManager.log("[NATIVE_OP] $op")
+      DebugLogManager.flushSynchronously()
+    } catch (e: Throwable) {
+      Log.e(TAG, "Error recording native op: ${e.message}", e)
     }
   }
 
@@ -451,10 +490,17 @@ object CrashHandlerHelper {
       packageInfo?.versionCode?.toLong() ?: 1L
     }
 
+    val prefs = try { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) } catch (_: Throwable) { null }
+    val savedLastNativeOp = prefs?.getString(KEY_LAST_NATIVE_OP, null)
+    val displayLastNativeOp = if (lastNativeOperation != "NONE") lastNativeOperation else (savedLastNativeOp ?: "NONE")
+
     val adblock = try { AdblockBridge.getInstance() } catch (_: Throwable) { null }
-    val adblockVersion = adblock?.nativeApiVersion ?: "unknown"
-    val adblockBuildId = adblock?.nativeBuildId ?: "unknown"
-    val adblockAbi = adblock?.nativeAbi ?: "unknown"
+    val adblockVersion = adblock?.nativeApiVersion?.takeIf { it != "unknown" }
+      ?: (prefs?.getString(KEY_NATIVE_API_VERSION, null) ?: "unknown")
+    val adblockBuildId = adblock?.nativeBuildId?.takeIf { it != "unknown" }
+      ?: (prefs?.getString(KEY_NATIVE_BUILD_ID, null) ?: "unknown")
+    val adblockAbi = adblock?.nativeAbi?.takeIf { it != "unknown" }
+      ?: (prefs?.getString(KEY_NATIVE_ABI, null) ?: "unknown")
     val adblockApiVersionNumeric = adblock?.nativeNumericApiVersion?.toString() ?: "0"
     val nativeCompatState = if (adblock?.isJniSignatureCompatible == true) "COMPATIBLE" else "GATED_FALLBACK"
     val adblockState = adblock?.state?.name ?: "UNKNOWN"
@@ -541,6 +587,7 @@ Adblock native version: $adblockVersion
 Adblock native build ID: $adblockBuildId
 Adblock API version: $adblockApiVersionNumeric
 Native compatibility state: $nativeCompatState
+Last native operation: $displayLastNativeOp
 SQLCipher load state: $sqlcipherLoadState
 
 SUBSYSTEM STATE:
@@ -566,6 +613,8 @@ $stackTrace
 
 NATIVE CRASH:
 ${if (throwable == null) """
+NATIVE_PROCESS_TERMINATION_SUSPECTED
+Last native operation: $displayLastNativeOp
 NO JAVA EXCEPTION CAPTURED.
 Process ended before the Java crash handler could execute or the process was terminated externally.
 """.trimIndent() else "N/A (Captured by Java UncaughtExceptionHandler)"}
