@@ -1,23 +1,53 @@
 package com.remmi.browser.storage
 
+import android.util.Log
+import com.remmi.browser.util.CrashHandlerHelper
+import com.remmi.browser.util.DebugLogManager
+import com.remmi.browser.util.StartupPhase
+
 object SqlCipherInitializer {
 
     @Volatile
     private var loaded = false
 
-    fun ensureLoaded() {
-        if (loaded) return
+    @Volatile
+    private var loadFailed = false
+
+    fun isLoaded(): Boolean = loaded
+
+    fun ensureLoaded(): Boolean {
+        if (loaded) return true
+        if (loadFailed) return false
 
         synchronized(this) {
-            if (loaded) return
+            if (loaded) return true
+            if (loadFailed) return false
 
-            try {
+            CrashHandlerHelper.updateStartupPhase(phase = StartupPhase.SQLCIPHER_LOAD_START)
+            DebugLogManager.log("[SQLCIPHER_LOAD_START]")
+
+            return try {
                 System.loadLibrary("sqlcipher")
                 loaded = true
+                loadFailed = false
+                CrashHandlerHelper.updateStartupPhase(phase = StartupPhase.SQLCIPHER_LOAD_OK)
+                DebugLogManager.log("[SQLCIPHER_LOAD_OK]")
+                true
             } catch (e: Throwable) {
-                // In JVM unit tests or test environments without native libs, log and continue
-                android.util.Log.w("SqlCipherInitializer", "Native sqlcipher library not loaded on this platform: ${e.message}")
+                loadFailed = true
+                loaded = false
+                CrashHandlerHelper.updateStartupPhase(phase = StartupPhase.SQLCIPHER_LOAD_FAILED)
+                DebugLogManager.log("[SQLCIPHER_LOAD_FAILED] ${e.message}")
+                Log.e("SqlCipherInitializer", "Native sqlcipher library failed to load: ${e.message}", e)
+                false
             }
+        }
+    }
+
+    fun resetForTesting(forceLoaded: Boolean? = null, forceFailed: Boolean? = null) {
+        synchronized(this) {
+            loaded = forceLoaded ?: false
+            loadFailed = forceFailed ?: false
         }
     }
 }

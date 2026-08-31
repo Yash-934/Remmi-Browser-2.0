@@ -65,9 +65,8 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
       try {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
         Log.i("RemmiApp", "Background initialization started...")
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.NATIVE_INIT)
         val bridge = AdblockBridge.getInstance()
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.DATABASE_INIT)
+        bridge.initEngine()
         RemmiDatabase.bootstrap(this)
         SettingsRepository.getInstance(this)
         val filterManager = com.remmi.adblock.FilterManager.getInstance(this, bridge)

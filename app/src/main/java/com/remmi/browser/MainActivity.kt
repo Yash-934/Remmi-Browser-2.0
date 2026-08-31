@@ -52,6 +52,7 @@ class MainActivity : FragmentActivity() {
     android.util.Log.i("AppStartup", "STATE_LOG: APP_START (time=$startTime)")
 
     super.onCreate(savedInstanceState)
+    com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.MAIN_ACTIVITY_CREATE)
 
     enableEdgeToEdge()
 

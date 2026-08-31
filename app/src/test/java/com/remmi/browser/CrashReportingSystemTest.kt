@@ -61,7 +61,7 @@ class CrashReportingSystemTest {
       thread = Thread.currentThread(),
       throwable = exception,
       sessionId = "session-test-uuid",
-      lastPhase = StartupPhase.GECKO_INIT.id,
+      lastPhase = StartupPhase.MAIN_ACTIVITY_CREATE.id,
       wasClean = false,
       lastCleanTimestamp = 0L,
       reportTime = System.currentTimeMillis()
@@ -72,10 +72,10 @@ class CrashReportingSystemTest {
     assertTrue(report.contains("DEVICE:"))
     assertTrue(report.contains("PROCESS:"))
     assertTrue(report.contains("STARTUP STATE:"))
-    assertTrue(report.contains("Last startup phase: GECKO_INIT"))
+    assertTrue(report.contains("Last startup phase: MAIN_ACTIVITY_CREATE"))
     assertTrue(report.contains("NATIVE:"))
     assertTrue(report.contains("SUBSYSTEM STATE:"))
-    assertTrue(report.contains("RECENT DIAGNOSTIC EVENTS:"))
+    assertTrue(report.contains("RECENT DIAGNOSTIC EVENTS"))
     assertTrue(report.contains("JAVA EXCEPTION:"))
     assertTrue(report.contains("java.lang.NullPointerException"))
     assertTrue(report.contains("Simulated crash in test component"))
@@ -84,12 +84,12 @@ class CrashReportingSystemTest {
 
   @Test
   fun testAbnormalTerminationDetection() {
-    // 1. Simulate a previous run that died during NATIVE_INIT without calling clean shutdown
+    // 1. Simulate a previous run that died during ADBLOCK_CONSTRUCTION_START without calling clean shutdown
     val prefs = context.getSharedPreferences(CrashHandlerHelper.PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit()
       .putBoolean(CrashHandlerHelper.KEY_PREVIOUS_RUN_CLEAN, false)
       .putString(CrashHandlerHelper.KEY_STARTUP_SESSION_ID, "dead-session-999")
-      .putString(CrashHandlerHelper.KEY_STARTUP_PHASE, StartupPhase.NATIVE_INIT.id)
+      .putString(CrashHandlerHelper.KEY_STARTUP_PHASE, StartupPhase.ADBLOCK_CONSTRUCTION_START.id)
       .putLong(CrashHandlerHelper.KEY_STARTUP_TIMESTAMP, System.currentTimeMillis() - 60000L)
       .commit()
 
@@ -104,7 +104,7 @@ class CrashReportingSystemTest {
     assertNotNull(report)
     assertTrue(report!!.contains("Report Type:\nABNORMAL_TERMINATION"))
     assertTrue(report.contains("NO JAVA EXCEPTION CAPTURED."))
-    assertTrue(report.contains("Last startup phase: NATIVE_INIT"))
+    assertTrue(report.contains("Last startup phase: ADBLOCK_CONSTRUCTION_START"))
     assertTrue(report.contains("Startup session ID: dead-session-999"))
 
     // 4. Verify new run session initialized with previous_run_clean = false

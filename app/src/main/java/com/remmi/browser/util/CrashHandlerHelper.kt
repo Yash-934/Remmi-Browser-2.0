@@ -23,11 +23,23 @@ enum class ReportType {
 }
 
 enum class StartupPhase(val id: String) {
-  PROCESS_STARTED("PROCESS_STARTED"),
+  PROCESS_START("PROCESS_START"),
+  SQLCIPHER_LOAD_START("SQLCIPHER_LOAD_START"),
+  SQLCIPHER_LOAD_OK("SQLCIPHER_LOAD_OK"),
+  SQLCIPHER_LOAD_FAILED("SQLCIPHER_LOAD_FAILED"),
   APPLICATION_CREATED("APPLICATION_CREATED"),
-  NATIVE_INIT("NATIVE_INIT"),
-  DATABASE_INIT("DATABASE_INIT"),
-  GECKO_INIT("GECKO_INIT"),
+  ADBLOCK_CONSTRUCTION_START("ADBLOCK_CONSTRUCTION_START"),
+  ADBLOCK_NATIVE_LOAD_OK("ADBLOCK_NATIVE_LOAD_OK"),
+  ADBLOCK_NATIVE_INIT_OK("ADBLOCK_NATIVE_INIT_OK"),
+  ADBLOCK_CONSTRUCTION_END("ADBLOCK_CONSTRUCTION_END"),
+  DATABASE_BOOTSTRAP_START("DATABASE_BOOTSTRAP_START"),
+  DATABASE_SQLCIPHER_OPEN_START("DATABASE_SQLCIPHER_OPEN_START"),
+  DATABASE_SQLCIPHER_OPEN_OK("DATABASE_SQLCIPHER_OPEN_OK"),
+  DATABASE_SQLCIPHER_OPEN_FAILED("DATABASE_SQLCIPHER_OPEN_FAILED"),
+  MAIN_ACTIVITY_CREATE("MAIN_ACTIVITY_CREATE"),
+  BROWSER_SCREEN_COMPOSE("BROWSER_SCREEN_COMPOSE"),
+  GECKO_MANAGER_CONSTRUCT_START("GECKO_MANAGER_CONSTRUCT_START"),
+  GECKO_MANAGER_CONSTRUCT_END("GECKO_MANAGER_CONSTRUCT_END"),
   FIRST_FRAME("FIRST_FRAME"),
   APP_READY("APP_READY"),
   SHUTDOWN("SHUTDOWN")
@@ -61,8 +73,11 @@ object CrashHandlerHelper {
     private set
 
   @Volatile
-  var currentPhase: StartupPhase = StartupPhase.PROCESS_STARTED
+  var currentPhase: StartupPhase = StartupPhase.PROCESS_START
     private set
+
+  @Volatile
+  private var appContext: Context? = null
 
   /**
    * Called as the earliest step during process initialization (RemmiApp.onCreate).
@@ -70,6 +85,7 @@ object CrashHandlerHelper {
    */
   fun onProcessStart(context: Context) {
     try {
+      appContext = context.applicationContext
       val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
       val wasClean = prefs.getBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
       val prevSessionId = prefs.getString(KEY_STARTUP_SESSION_ID, null)
@@ -114,37 +130,42 @@ object CrashHandlerHelper {
       // Initialize the new session heartbeat
       val newSessionId = UUID.randomUUID().toString()
       currentSessionId = newSessionId
-      currentPhase = StartupPhase.PROCESS_STARTED
+      currentPhase = StartupPhase.PROCESS_START
 
       prefs.edit()
         .putBoolean(KEY_PREVIOUS_RUN_CLEAN, false)
         .putLong(KEY_STARTUP_TIMESTAMP, System.currentTimeMillis())
         .putString(KEY_STARTUP_SESSION_ID, newSessionId)
-        .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_STARTED.id)
+        .putString(KEY_STARTUP_PHASE, StartupPhase.PROCESS_START.id)
         .commit()
 
-      DebugLogManager.log("[APP_LIFECYCLE] PROCESS_STARTED (session=$newSessionId)")
+      DebugLogManager.log("[APP_LIFECYCLE] PROCESS_START (session=$newSessionId)")
     } catch (e: Throwable) {
       Log.e(TAG, "Error in onProcessStart: ${e.message}", e)
     }
   }
 
   /**
-   * Updates startup phase checkpoint. When APP_READY is reached, marks the run clean.
+   * Updates startup phase checkpoint synchronously to ensure crash journal is always up to date.
+   * When APP_READY is reached, marks the run clean.
    */
-  fun updateStartupPhase(context: Context, phase: StartupPhase) {
+  fun updateStartupPhase(context: Context? = null, phase: StartupPhase) {
     try {
       currentPhase = phase
-      val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-      val editor = prefs.edit().putString(KEY_STARTUP_PHASE, phase.id)
+      val ctx = context?.applicationContext ?: appContext
+      if (ctx != null) {
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit().putString(KEY_STARTUP_PHASE, phase.id)
 
-      if (phase == StartupPhase.APP_READY) {
-        editor.putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
-        editor.putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
+        if (phase == StartupPhase.APP_READY) {
+          editor.putBoolean(KEY_PREVIOUS_RUN_CLEAN, true)
+          editor.putLong(KEY_LAST_CLEAN_TIMESTAMP, System.currentTimeMillis())
+        }
+        editor.commit()
       }
-      editor.apply()
 
       DebugLogManager.log("[APP_LIFECYCLE] ${phase.id}")
+      DebugLogManager.flushSynchronously()
     } catch (e: Throwable) {
       Log.e(TAG, "Error updating startup phase: ${e.message}", e)
     }
@@ -434,8 +455,11 @@ object CrashHandlerHelper {
     val adblockVersion = adblock?.nativeApiVersion ?: "unknown"
     val adblockBuildId = adblock?.nativeBuildId ?: "unknown"
     val adblockAbi = adblock?.nativeAbi ?: "unknown"
+    val adblockApiVersionNumeric = adblock?.nativeNumericApiVersion?.toString() ?: "0"
     val nativeCompatState = if (adblock?.isJniSignatureCompatible == true) "COMPATIBLE" else "GATED_FALLBACK"
     val adblockState = adblock?.state?.name ?: "UNKNOWN"
+
+    val sqlcipherLoadState = if (com.remmi.browser.storage.SqlCipherInitializer.isLoaded()) "LOADED" else "NOT_LOADED"
 
     val dbState = try {
       when (val s = RemmiDatabase.databaseState.value) {
@@ -461,7 +485,7 @@ object CrashHandlerHelper {
     val webExtState = "REGISTERED"
 
     val recentBreadcrumbs = try {
-      DebugLogManager.getRecentEvents(200)
+      DebugLogManager.getRecentEvents(100)
     } catch (_: Throwable) {
       emptyList()
     }
@@ -486,7 +510,7 @@ Report Type:
 ${reportType.name}
 
 Timestamp: $now
-App Version: $versionName ($versionCode)
+APK version: $versionName ($versionCode)
 Package: ${context.packageName}
 Startup Session ID: $sessionId
 
@@ -505,27 +529,31 @@ Thread if available: ${thread?.let { "${it.name} (ID: ${it.id})" } ?: "N/A (Proc
 
 STARTUP STATE:
 Previous run clean: $wasClean
+Previous startup phase: $lastPhase
 Last startup phase: $lastPhase
 Current startup phase: ${currentPhase.id}
 Startup session ID: $sessionId
 Last clean timestamp: $lastCleanTimeStr
 
 NATIVE:
+Native ABI: $adblockAbi (Supported ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")})
 Adblock native version: $adblockVersion
 Adblock native build ID: $adblockBuildId
-Runtime ABI: $adblockAbi
+Adblock API version: $adblockApiVersionNumeric
 Native compatibility state: $nativeCompatState
+SQLCipher load state: $sqlcipherLoadState
 
 SUBSYSTEM STATE:
 Adblock: $adblockState
 Gecko: $geckoState
 Database: $dbState
+SQLCipher load state: $sqlcipherLoadState
 Tor: $torState
 Ghost: $ghostState
 Shield: $shieldState
 WebExtension: $webExtState
 
-RECENT DIAGNOSTIC EVENTS:
+RECENT DIAGNOSTIC EVENTS (LAST 100):
 $breadcrumbText
 
 JAVA EXCEPTION:

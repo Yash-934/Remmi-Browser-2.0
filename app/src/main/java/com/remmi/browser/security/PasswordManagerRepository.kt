@@ -101,12 +101,6 @@ class PasswordManagerRepository private constructor(
         return@launch
       }
 
-      val metadata = getDb().masterKeyMetadataDao().getMetadata()
-      if (metadata == null) {
-        _lockState.value = VaultLockState.Uninitialized
-        return@launch
-      }
-
       val savedFailed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0)
       val lockoutUntil = prefs.getLong(KEY_LOCKOUT_UNTIL_TIMESTAMP, 0L)
       val now = System.currentTimeMillis()
@@ -118,6 +112,18 @@ class PasswordManagerRepository private constructor(
         startLockoutCountdown(remainingSec, remainingSec)
       } else {
         _lockState.value = VaultLockState.Locked
+      }
+
+      // Defer database work until database state becomes READY
+      RemmiDatabase.databaseState.collect { dbState ->
+        if (dbState is RemmiDatabase.DatabaseState.Ready) {
+          try {
+            val metadata = dbState.database.masterKeyMetadataDao().getMetadata()
+            if (metadata == null) {
+              _lockState.value = VaultLockState.Uninitialized
+            }
+          } catch (_: Throwable) {}
+        }
       }
     }
   }

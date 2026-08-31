@@ -544,6 +544,14 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetVersion(
     output.into_raw()
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetApiVersion(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    2
+}
+
 
 #[no_mangle]
 pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetBuildId(

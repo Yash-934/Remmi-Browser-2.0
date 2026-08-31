@@ -160,6 +160,8 @@ fun BrowserScreen(
   val scope = rememberCoroutineScope()
   val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
+  com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.BROWSER_SCREEN_COMPOSE)
+
   val tabManager = remember { TabManager.getInstance() }
   
   val torManager = remember { TorManager.getInstance(context) }

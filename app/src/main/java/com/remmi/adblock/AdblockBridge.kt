@@ -1,6 +1,7 @@
 package com.remmi.adblock
 
 import android.util.Log
+import kotlinx.coroutines.launch
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -62,6 +63,9 @@ class AdblockBridge {
   var nativeApiVersion: String = "unknown"
     private set
 
+  var nativeNumericApiVersion: Int = 0
+    private set
+
   var isNativeHiddenClassIdCompatible: Boolean = false
     private set
 
@@ -72,18 +76,21 @@ class AdblockBridge {
     private set
 
   private val initialized = AtomicBoolean(false)
+  private val isInitializing = AtomicBoolean(false)
 
   init {
-    initEngine()
+    // Lightweight constructor: initialize in-memory fallback rules only
+    loadDefaultTrackerRules(compileToNative = false)
   }
 
   fun isNativeAvailable(): Boolean = isNativeLoaded
 
+  fun verifyNativeCompatibility(apiVersion: Int): Boolean {
+    // Version 2 corresponds to 3-argument nativeGetHiddenClassIdSelectors(classes, ids, exceptions).
+    return apiVersion >= 2
+  }
+
   fun verifyNativeCompatibility(version: String, buildId: String, abi: String): Boolean {
-    // Current Kotlin declares 3-argument nativeGetHiddenClassIdSelectors(classes, ids, exceptions).
-    // Prebuilt .so binaries (version "adblock-rust-0.8.0-remmi" or legacy 0.8.0) contain the legacy 4-argument signature.
-    // Fresh native .so rebuild (version >= "adblock-rust-0.8.1-remmi" or build flag "v2-compat") enables the 3-argument signature.
-    // Old 0.8.0 binaries remain strictly gated (returning false) so the app does not call the incompatible JNI method.
     if (version.startsWith("adblock-rust-0.8.0")) {
       return buildId.contains("v2-compat")
     }
@@ -100,6 +107,7 @@ class AdblockBridge {
     Log.i(TAG, "buildId=$nativeBuildId")
     Log.i(TAG, "abi=$nativeAbi")
     Log.i(TAG, "apiVersion=$nativeApiVersion")
+    Log.i(TAG, "numericApiVersion=$nativeNumericApiVersion")
   }
 
   fun getEngineGeneration(): Long {
@@ -112,11 +120,17 @@ class AdblockBridge {
     return localEngineGeneration.get()
   }
 
-  private fun initEngine() {
+  fun initEngine() {
+    if (initialized.get()) return
+    if (!isInitializing.compareAndSet(false, true)) return
+
+    com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_CONSTRUCTION_START)
     try {
       System.loadLibrary("adblock_rust")
+      com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_NATIVE_LOAD_OK)
       val initSuccess = nativeInit()
       if (initSuccess) {
+        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_NATIVE_INIT_OK)
         isNativeLoaded = true
         state = AdblockState.READY
         Log.i(TAG, "Native adblock_rust loaded and initialized successfully!")
@@ -130,8 +144,12 @@ class AdblockBridge {
         try {
           nativeAbi = nativeGetAbi()
         } catch (_: Throwable) { nativeAbi = "unknown" }
+        try {
+          nativeNumericApiVersion = nativeGetApiVersion()
+        } catch (_: Throwable) { nativeNumericApiVersion = 0 }
 
-        isJniSignatureCompatible = verifyNativeCompatibility(nativeApiVersion, nativeBuildId, nativeAbi)
+        // Gate using explicit numeric API version: version >= 2 corresponds to 3-argument nativeGetHiddenClassIdSelectors
+        isJniSignatureCompatible = (nativeNumericApiVersion >= 2)
         isNativeHiddenClassIdCompatible = isJniSignatureCompatible
 
         logNativeCompatDiagnostic(isJniSignatureCompatible)
@@ -153,10 +171,20 @@ class AdblockBridge {
       logNativeCompatDiagnostic(false)
     }
 
-    loadDefaultTrackerRules()
+    loadDefaultTrackerRules(compileToNative = isNativeLoaded)
 
     if (isNativeLoaded) {
       selfTest()
+    }
+    initialized.set(true)
+    isInitializing.set(false)
+    com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(phase = com.remmi.browser.util.StartupPhase.ADBLOCK_CONSTRUCTION_END)
+  }
+
+  fun initializeAsync(scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)) {
+    if (initialized.get()) return
+    scope.launch {
+      initEngine()
     }
   }
 
@@ -167,7 +195,7 @@ class AdblockBridge {
 
     return try {
       Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
-      loadDefaultTrackerRules()
+      initEngine()
 
       val totalRules = getLoadedRulesCount()
       Log.d(TAG, "[ADBLOCK_RULES] total=$totalRules")
@@ -187,7 +215,6 @@ class AdblockBridge {
         Log.i(TAG, "[ADBLOCK_READY] native=false (fallback engine active)")
       }
 
-      initialized.set(true)
       true
     } catch (t: Throwable) {
       state = AdblockState.FAILED
@@ -224,7 +251,7 @@ class AdblockBridge {
     }
   }
 
-  fun loadDefaultTrackerRules() {
+  fun loadDefaultTrackerRules(compileToNative: Boolean = true) {
     allowList.clear()
     fallbackCosmeticExceptions.clear()
 
@@ -256,7 +283,7 @@ class AdblockBridge {
     )
     blockedSubstrings.addAll(defaultPatterns)
 
-    if (isNativeLoaded) {
+    if (compileToNative && isNativeLoaded) {
       val rulesText = defaultDomains.joinToString("\n") { "||$it^" } + "\n" +
         defaultPatterns.joinToString("\n")
       try {
@@ -707,6 +734,7 @@ class AdblockBridge {
   private external fun nativeGetEngineGeneration(): Long
   private external fun nativeSelfTest(): Boolean
   private external fun nativeGetVersion(): String
+  private external fun nativeGetApiVersion(): Int
   private external fun nativeGetBuildId(): String
   private external fun nativeGetAbi(): String
 

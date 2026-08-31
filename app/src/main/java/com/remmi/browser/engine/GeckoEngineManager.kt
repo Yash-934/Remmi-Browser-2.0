@@ -923,7 +923,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
 
     fun getInstance(context: Context): GeckoEngineManager {
       return INSTANCE ?: synchronized(this) {
-        INSTANCE ?: GeckoEngineManager(context.applicationContext).also { INSTANCE = it }
+        if (INSTANCE != null) {
+          INSTANCE!!
+        } else {
+          com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.GECKO_MANAGER_CONSTRUCT_START)
+          val mgr = GeckoEngineManager(context.applicationContext).also { INSTANCE = it }
+          com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.GECKO_MANAGER_CONSTRUCT_END)
+          mgr
+        }
       }
     }
   }

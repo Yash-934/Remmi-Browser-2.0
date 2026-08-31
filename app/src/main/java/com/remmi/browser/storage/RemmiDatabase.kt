@@ -596,6 +596,7 @@ abstract class RemmiDatabase : RoomDatabase() {
         _databaseState.value = DatabaseState.Ready(existing)
         return
       }
+      com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.DATABASE_BOOTSTRAP_START)
       bootstrapScope.launch {
         try {
           val db = getDatabaseAsync(context.applicationContext)
@@ -625,7 +626,15 @@ abstract class RemmiDatabase : RoomDatabase() {
           d = bootstrapScope.async(Dispatchers.IO) {
             val startTime = android.os.SystemClock.elapsedRealtime()
             try {
-              SqlCipherInitializer.ensureLoaded()
+              com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(ctx, com.remmi.browser.util.StartupPhase.DATABASE_SQLCIPHER_OPEN_START)
+              val sqlcipherLoaded = SqlCipherInitializer.ensureLoaded()
+              if (!sqlcipherLoaded) {
+                com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(ctx, com.remmi.browser.util.StartupPhase.DATABASE_SQLCIPHER_OPEN_FAILED)
+                val err = IllegalStateException("SQLCipher native library failed to load (SQLCIPHER_LOAD_FAILED). Controlled Error state.")
+                _databaseState.value = DatabaseState.Error(err)
+                throw err
+              }
+
               val passphrase = getOrCreatePassphrase(ctx)
               val supportFactory = SupportOpenHelperFactory(passphrase, null, false)
               val instance = Room.databaseBuilder(
@@ -638,11 +647,13 @@ abstract class RemmiDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
               INSTANCE = instance
+              com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(ctx, com.remmi.browser.util.StartupPhase.DATABASE_SQLCIPHER_OPEN_OK)
               _databaseState.value = DatabaseState.Ready(instance)
               val duration = android.os.SystemClock.elapsedRealtime() - startTime
               android.util.Log.i("RemmiDatabase", "Asynchronous database initialization completed in ${duration}ms")
               instance
             } catch (t: Throwable) {
+              com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(ctx, com.remmi.browser.util.StartupPhase.DATABASE_SQLCIPHER_OPEN_FAILED)
               _databaseState.value = DatabaseState.Error(t)
               throw t
             } finally {
