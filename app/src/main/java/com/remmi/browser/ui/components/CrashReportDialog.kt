@@ -58,6 +58,13 @@ fun CrashReportDialog(
 ) {
   val context = LocalContext.current
   var copied by remember { mutableStateOf(false) }
+  val isAbnormal = crashResult.reportType == com.remmi.browser.util.ReportType.ABNORMAL_TERMINATION
+  val titleText = if (isAbnormal) "Abnormal Termination Detected" else "Crash Report Detected"
+  val descriptionText = if (isAbnormal) {
+    "A previous session was terminated abnormally (e.g. process kill, out-of-memory, or native crash). A diagnostic report has been automatically generated."
+  } else {
+    "An unexpected exception was caught. A complete crash report has been saved."
+  }
 
   AlertDialog(
     onDismissRequest = onDismiss,
@@ -72,12 +79,12 @@ fun CrashReportDialog(
       ) {
         Icon(
           imageVector = Icons.Default.Info,
-          contentDescription = "Crash Log",
+          contentDescription = titleText,
           tint = MaterialTheme.colorScheme.error,
           modifier = Modifier.size(24.dp)
         )
         Text(
-          text = "Crash Log Detected",
+          text = titleText,
           style = MaterialTheme.typography.titleLarge,
           fontWeight = FontWeight.Bold
         )
@@ -108,7 +115,7 @@ fun CrashReportDialog(
               modifier = Modifier.size(18.dp)
             )
             Text(
-              text = "Full log saved to:\n${crashResult.savedPath}",
+              text = "Saved to:\n${crashResult.savedPath}",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onPrimaryContainer,
               fontWeight = FontWeight.Medium
@@ -117,7 +124,7 @@ fun CrashReportDialog(
         }
 
         Text(
-          text = "You can view, share, or copy the crash log below.",
+          text = descriptionText,
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -158,10 +165,10 @@ fun CrashReportDialog(
               val sendIntent = Intent().apply {
                 action = Intent.ACTION_SEND
                 putExtra(Intent.EXTRA_TEXT, crashResult.fullReport)
-                putExtra(Intent.EXTRA_SUBJECT, "Remmi Browser Crash Report")
+                putExtra(Intent.EXTRA_SUBJECT, if (isAbnormal) "Remmi Browser Diagnostic Report" else "Remmi Browser Crash Report")
                 type = "text/plain"
               }
-              val shareIntent = Intent.createChooser(sendIntent, "Share Crash Log")
+              val shareIntent = Intent.createChooser(sendIntent, "Share Diagnostic Report")
               context.startActivity(shareIntent)
             } catch (e: Exception) {
               Toast.makeText(context, "Could not open share sheet", Toast.LENGTH_SHORT).show()
@@ -181,7 +188,7 @@ fun CrashReportDialog(
           onClick = {
             try {
               val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-              val clip = ClipData.newPlainText("Remmi Crash Log", crashResult.fullReport)
+              val clip = ClipData.newPlainText("Remmi Diagnostic Report", crashResult.fullReport)
               clipboard?.setPrimaryClip(clip)
               copied = true
               Toast.makeText(context, "Copied to clipboard!", Toast.LENGTH_SHORT).show()

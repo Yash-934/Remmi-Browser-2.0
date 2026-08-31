@@ -76,19 +76,26 @@ class MainActivity : FragmentActivity() {
 
       androidx.compose.runtime.LaunchedEffect(Unit) {
         android.util.Log.i("AppStartup", "STATE_LOG: FIRST_FRAME (time=${android.os.SystemClock.elapsedRealtime()})")
+        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this@MainActivity, com.remmi.browser.util.StartupPhase.FIRST_FRAME)
         kotlinx.coroutines.withContext(Dispatchers.IO) {
-          val pendingCrash = CrashHandlerHelper.checkAndExportPendingCrash(this@MainActivity)
+          val pendingCrash = com.remmi.browser.util.CrashHandlerHelper.checkAndExportPendingReport(this@MainActivity)
           if (pendingCrash != null) {
             kotlinx.coroutines.withContext(Dispatchers.Main) {
               crashResultToShow = pendingCrash
+              val label = if (pendingCrash.reportType == com.remmi.browser.util.ReportType.ABNORMAL_TERMINATION) {
+                "Abnormal termination report"
+              } else {
+                "Crash report"
+              }
               android.widget.Toast.makeText(
                 this@MainActivity,
-                "Crash log saved to Downloads/Remmi Browser/",
+                "$label saved to Downloads/Remmi Crash Reports/",
                 android.widget.Toast.LENGTH_LONG
               ).show()
             }
           }
         }
+        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this@MainActivity, com.remmi.browser.util.StartupPhase.APP_READY)
       }
 
       RemmiTheme(
@@ -194,6 +201,9 @@ class MainActivity : FragmentActivity() {
   }
 
   override fun onDestroy() {
+    if (isFinishing) {
+      com.remmi.browser.util.CrashHandlerHelper.markCleanShutdown(this)
+    }
     super.onDestroy()
   }
 

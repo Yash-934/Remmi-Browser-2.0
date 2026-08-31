@@ -917,6 +917,10 @@ class GeckoEngineManager private constructor(private val context: Context) {
     @Volatile
     private var INSTANCE: GeckoEngineManager? = null
 
+    fun peekInitState(): String? {
+      return INSTANCE?._initState?.value?.name
+    }
+
     fun getInstance(context: Context): GeckoEngineManager {
       return INSTANCE ?: synchronized(this) {
         INSTANCE ?: GeckoEngineManager(context.applicationContext).also { INSTANCE = it }
