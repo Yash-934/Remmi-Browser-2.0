@@ -225,6 +225,7 @@ function connectNative() {
         status: "CONNECTED",
         role: "AD_TRACKER_BLOCKER_ONLY",
         instanceId: currentInst,
+        portGeneration: currentGen,
         generation: currentGen
       });
     } catch (_err) {}

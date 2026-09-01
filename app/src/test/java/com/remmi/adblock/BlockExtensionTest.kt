@@ -381,4 +381,141 @@ class BlockExtensionTest {
       assertEquals("Cancel result for $url in 10-seq must match expectation", isAd, res!!.optBoolean("cancel"))
     }
   }
+
+  @Test
+  fun testPortGenerationCorrelationRegression() {
+    val receivedMessages = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+
+    // Custom test port implementation
+    class TestWebExtensionPort : WebExtension.Port() {
+      var internalDelegate: WebExtension.PortDelegate? = null
+      override fun setDelegate(d: WebExtension.PortDelegate?) {
+        this.internalDelegate = d
+      }
+      override fun postMessage(msgObj: JSONObject) {
+        receivedMessages.add(msgObj)
+      }
+    }
+
+    // 1. First connection
+    val mockPort1 = TestWebExtensionPort()
+    blockExtension.onConnect(mockPort1)
+    val portDelegate1 = mockPort1.internalDelegate
+    assertNotNull("Port delegate 1 must be registered", portDelegate1)
+
+    fun sendAndCapture1(msg: JSONObject): JSONObject {
+      receivedMessages.clear()
+      portDelegate1!!.onPortMessage(msg, mockPort1)
+      val resp = receivedMessages.poll()
+      assertNotNull("Must return exactly one response", resp)
+      return resp!!
+    }
+
+    // 1. First connection: JS sends PORT_STATUS with generation=1
+    val statusMsg1 = JSONObject().apply {
+      put("type", "PORT_STATUS")
+      put("status", "CONNECTED")
+      put("instanceId", 1)
+      put("portGeneration", 1L)
+      put("generation", 1L)
+    }
+    portDelegate1!!.onPortMessage(statusMsg1, mockPort1)
+
+    // 2. PING with gen=1 -> Kotlin response gen=1
+    val pingMsg1 = JSONObject().apply {
+      put("type", "PING")
+      put("requestId", "ping_req_gen1")
+      put("portGeneration", 1L)
+    }
+    val pingResp1 = sendAndCapture1(pingMsg1)
+    assertTrue("PING must succeed", pingResp1.optBoolean("ok"))
+    assertTrue("PING must pong", pingResp1.optBoolean("pong"))
+    assertEquals("PING response portGeneration must be 1", 1L, pingResp1.optLong("portGeneration"))
+    assertEquals("PING response requestId must match", "ping_req_gen1", pingResp1.optString("requestId"))
+
+    // 3. SHOULD_BLOCK with gen=1 -> Kotlin response gen=1
+    val blockMsg1 = JSONObject().apply {
+      put("type", "SHOULD_BLOCK")
+      put("requestId", "block_req_gen1")
+      put("url", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js")
+      put("sourceUrl", "https://adblock-tester.com/")
+      put("resourceType", "script")
+      put("thirdParty", true)
+      put("portGeneration", 1L)
+    }
+    val blockResp1 = sendAndCapture1(blockMsg1)
+    assertTrue("SHOULD_BLOCK response ok must be true", blockResp1.optBoolean("ok"))
+    assertTrue("SHOULD_BLOCK must block ad script", blockResp1.optBoolean("cancel"))
+    assertEquals("SHOULD_BLOCK response portGeneration must be 1", 1L, blockResp1.optLong("portGeneration"))
+    assertEquals("SHOULD_BLOCK response requestId must match", "block_req_gen1", blockResp1.optString("requestId"))
+
+    // 4. Cosmetic message with gen=1 -> Kotlin response gen=1
+    val cosmeticMsg1 = JSONObject().apply {
+      put("type", "GET_COSMETIC_RESOURCES")
+      put("requestId", "cosmetic_req_gen1")
+      put("url", "https://example.com")
+      put("portGeneration", 1L)
+    }
+    val cosmeticResp1 = sendAndCapture1(cosmeticMsg1)
+    assertTrue("COSMETIC response ok must be true", cosmeticResp1.optBoolean("ok"))
+    assertEquals("COSMETIC response portGeneration must be 1", 1L, cosmeticResp1.optLong("portGeneration"))
+    assertEquals("COSMETIC response requestId must match", "cosmetic_req_gen1", cosmeticResp1.optString("requestId"))
+
+    // 5. Reconnection: New port with gen=2
+    val mockPort2 = TestWebExtensionPort()
+    blockExtension.onConnect(mockPort2)
+    val portDelegate2 = mockPort2.internalDelegate
+    assertNotNull("New port delegate must be registered", portDelegate2)
+
+    val statusMsg2 = JSONObject().apply {
+      put("type", "PORT_STATUS")
+      put("status", "CONNECTED")
+      put("instanceId", 2)
+      put("portGeneration", 2L)
+      put("generation", 2L)
+    }
+    portDelegate2!!.onPortMessage(statusMsg2, mockPort2)
+
+    fun sendAndCapture2(msg: JSONObject): JSONObject {
+      receivedMessages.clear()
+      portDelegate2.onPortMessage(msg, mockPort2)
+      val resp = receivedMessages.poll()
+      assertNotNull("Must return exactly one response", resp)
+      return resp!!
+    }
+
+    // 6. PING with gen=2 -> Kotlin response gen=2
+    val pingMsg2 = JSONObject().apply {
+      put("type", "PING")
+      put("requestId", "ping_req_gen2")
+      put("portGeneration", 2L)
+    }
+    val pingResp2 = sendAndCapture2(pingMsg2)
+    assertTrue("PING gen=2 must succeed", pingResp2.optBoolean("ok"))
+    assertEquals("PING gen=2 response portGeneration must be 2", 2L, pingResp2.optLong("portGeneration"))
+    assertEquals("PING gen=2 requestId must match", "ping_req_gen2", pingResp2.optString("requestId"))
+
+    // 7. SHOULD_BLOCK with gen=2 -> Kotlin response gen=2
+    val blockMsg2 = JSONObject().apply {
+      put("type", "SHOULD_BLOCK")
+      put("requestId", "block_req_gen2")
+      put("url", "https://google-analytics.com/analytics.js")
+      put("sourceUrl", "https://adblock-tester.com/")
+      put("resourceType", "script")
+      put("thirdParty", true)
+      put("portGeneration", 2L)
+    }
+    val blockResp2 = sendAndCapture2(blockMsg2)
+    assertTrue("SHOULD_BLOCK gen=2 response ok must be true", blockResp2.optBoolean("ok"))
+    assertTrue("SHOULD_BLOCK gen=2 must block tracker", blockResp2.optBoolean("cancel"))
+    assertEquals("SHOULD_BLOCK gen=2 response portGeneration must be 2", 2L, blockResp2.optLong("portGeneration"))
+
+    // 8. JS Correlation Discard Simulation:
+    // Old response carrying portGeneration=1 received while JS is at generation=2 is safely discarded
+    val pendingJsGen = 2L
+    val isOldAccepted = (pingResp1.optLong("portGeneration") == pendingJsGen)
+    assertFalse("Old response with gen=1 must NOT match JS pending request expecting gen=2", isOldAccepted)
+    val isNewAccepted = (pingResp2.optLong("portGeneration") == pendingJsGen)
+    assertTrue("New response with gen=2 MUST match JS pending request expecting gen=2", isNewAccepted)
+  }
 }
