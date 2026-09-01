@@ -125,7 +125,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     message: Any,
     sender: WebExtension.MessageSender
   ): org.mozilla.geckoview.GeckoResult<Any>? {
-    if (nativeApp != "remmi_engine_extension") {
+    // Permissive app name check: accept "remmi_engine_extension", extension id, or matching sender
+    if (nativeApp.isNotEmpty() && 
+        nativeApp != "remmi_engine_extension" && 
+        nativeApp != sender.webExtension.id && 
+        sender.webExtension.id != "extension@remmi.browser") {
       Log.w(TAG, "[WEBEXT_REJECTED] nativeApp=$nativeApp sender=${sender.webExtension.id}")
       return org.mozilla.geckoview.GeckoResult.fromValue(
         JSONObject().apply {
@@ -147,13 +151,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     }
 
     val type = messageJson.optString("type")
-    Log.d(
-      TAG,
-      "[WEBEXT_NATIVE_IN] type=$type class=${message.javaClass.simpleName}"
-    )
+    val reqId = messageJson.optString("requestId").ifEmpty { "n/a" }
+    Log.d(TAG, "[NM_RECEIVE] type=$type requestId=$reqId")
 
     if (type == "PING") {
-      Log.d(TAG, "[WEBEXT_NATIVE_COMPLETE] type=PING")
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=PING requestId=$reqId")
       return org.mozilla.geckoview.GeckoResult.fromValue(
         JSONObject().apply {
           put("ok", true)
@@ -165,25 +167,23 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
     if (type == "BLOCK_ELEMENT") {
       val selector = messageJson.optString("selector").trim()
       val domain = messageJson.optString("domain").trim()
-      if (selector.isNotEmpty()) {
+      val resp = if (selector.isNotEmpty()) {
         val rule = if (domain.isNotEmpty()) "$domain##$selector" else "##$selector"
         adblockBridge.addCustomRule(rule)
         Log.i(TAG, "[ADBLOCK_CUSTOM_RULE] Added element block rule: $rule")
-        return org.mozilla.geckoview.GeckoResult.fromValue(
-          JSONObject().apply {
-            put("ok", true)
-            put("rule", rule)
-            put("generation", adblockBridge.getEngineGeneration())
-          }
-        )
+        JSONObject().apply {
+          put("ok", true)
+          put("rule", rule)
+          put("generation", adblockBridge.getEngineGeneration())
+        }
       } else {
-        return org.mozilla.geckoview.GeckoResult.fromValue(
-          JSONObject().apply {
-            put("ok", false)
-            put("error", "empty_selector")
-          }
-        )
+        JSONObject().apply {
+          put("ok", false)
+          put("error", "empty_selector")
+        }
       }
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=BLOCK_ELEMENT requestId=$reqId")
+      return org.mozilla.geckoview.GeckoResult.fromValue(resp)
     }
 
     if (type == "GET_COSMETIC_RESOURCES") {
@@ -215,6 +215,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
       val isCosmeticAllowed = cosmeticPolicyProvider?.invoke(host) ?: true
       if (!isCosmeticAllowed) {
         Log.d(TAG, "[COSMETIC_RESULT] disabled_by_policy hostHash=${host.hashCode()}")
+        Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=GET_COSMETIC_RESOURCES requestId=$reqId")
         return org.mozilla.geckoview.GeckoResult.fromValue(
           JSONObject().apply {
             put("ok", true)
@@ -228,43 +229,38 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
         )
       }
 
-      val result = org.mozilla.geckoview.GeckoResult<Any>()
-      extensionScope.launch {
-        try {
-          val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
-          Log.d(
-            TAG,
-            "[COSMETIC_RESULT] hide=${cosmetic.hideSelectors.size} forceHide=${cosmetic.forceHideSelectors.size} procedural=${cosmetic.proceduralCount} generation=${cosmetic.generation}"
-          )
-          result.complete(
-            JSONObject().apply {
-              put("ok", cosmetic.ok)
-              put("generation", cosmetic.generation)
-              put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
-              put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
-              put("procedural", org.json.JSONArray(cosmetic.procedural))
-              put("proceduralCount", cosmetic.proceduralCount)
-              put("generics", cosmetic.generics)
-              if (cosmetic.error != null) put("error", cosmetic.error)
-            }
-          )
-        } catch (t: Throwable) {
-          Log.e(TAG, "[COSMETIC_ERROR] error=${t.message}", t)
-          result.complete(
-            JSONObject().apply {
-              put("ok", false)
-              put("error", t.message ?: "exception")
-              put("generation", adblockBridge.getEngineGeneration())
-              put("hideSelectors", org.json.JSONArray())
-              put("forceHideSelectors", org.json.JSONArray())
-              put("procedural", org.json.JSONArray())
-              put("proceduralCount", 0)
-              put("generics", false)
-            }
-          )
+      val resp = try {
+        val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
+        Log.d(
+          TAG,
+          "[COSMETIC_RESULT] hide=${cosmetic.hideSelectors.size} forceHide=${cosmetic.forceHideSelectors.size} procedural=${cosmetic.proceduralCount} generation=${cosmetic.generation}"
+        )
+        JSONObject().apply {
+          put("ok", cosmetic.ok)
+          put("generation", cosmetic.generation)
+          put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+          put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+          put("procedural", org.json.JSONArray(cosmetic.procedural))
+          put("proceduralCount", cosmetic.proceduralCount)
+          put("generics", cosmetic.generics)
+          if (cosmetic.error != null) put("error", cosmetic.error)
+        }
+      } catch (t: Throwable) {
+        Log.e(TAG, "[COSMETIC_ERROR] error=${t.message}", t)
+        JSONObject().apply {
+          put("ok", false)
+          put("error", t.message ?: "exception")
+          put("generation", adblockBridge.getEngineGeneration())
+          put("hideSelectors", org.json.JSONArray())
+          put("forceHideSelectors", org.json.JSONArray())
+          put("procedural", org.json.JSONArray())
+          put("proceduralCount", 0)
+          put("generics", false)
         }
       }
-      return result
+
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=GET_COSMETIC_RESOURCES requestId=$reqId")
+      return org.mozilla.geckoview.GeckoResult.fromValue(resp)
     }
 
     if (type == "GET_HIDDEN_CLASS_ID_SELECTORS") {
@@ -285,43 +281,39 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
         for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
       }
 
-      val result = org.mozilla.geckoview.GeckoResult<Any>()
-      extensionScope.launch {
-        try {
-          val cosmetic = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
-          result.complete(
-            JSONObject().apply {
-              put("ok", cosmetic.ok)
-              put("generation", cosmetic.generation)
-              put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
-              put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
-              put("procedural", org.json.JSONArray(cosmetic.procedural))
-              put("proceduralCount", cosmetic.proceduralCount)
-              put("generics", cosmetic.generics)
-              if (cosmetic.error != null) put("error", cosmetic.error)
-            }
-          )
-        } catch (t: Throwable) {
-          Log.e(TAG, "[COSMETIC_ERROR] hidden class/id error=${t.message}", t)
-          result.complete(
-            JSONObject().apply {
-              put("ok", false)
-              put("error", t.message ?: "exception")
-              put("generation", adblockBridge.getEngineGeneration())
-              put("hideSelectors", org.json.JSONArray())
-              put("forceHideSelectors", org.json.JSONArray())
-              put("procedural", org.json.JSONArray())
-              put("proceduralCount", 0)
-              put("generics", false)
-            }
-          )
+      val resp = try {
+        val cosmetic = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
+        JSONObject().apply {
+          put("ok", cosmetic.ok)
+          put("generation", cosmetic.generation)
+          put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+          put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+          put("procedural", org.json.JSONArray(cosmetic.procedural))
+          put("proceduralCount", cosmetic.proceduralCount)
+          put("generics", cosmetic.generics)
+          if (cosmetic.error != null) put("error", cosmetic.error)
+        }
+      } catch (t: Throwable) {
+        Log.e(TAG, "[COSMETIC_ERROR] hidden class/id error=${t.message}", t)
+        JSONObject().apply {
+          put("ok", false)
+          put("error", t.message ?: "exception")
+          put("generation", adblockBridge.getEngineGeneration())
+          put("hideSelectors", org.json.JSONArray())
+          put("forceHideSelectors", org.json.JSONArray())
+          put("procedural", org.json.JSONArray())
+          put("proceduralCount", 0)
+          put("generics", false)
         }
       }
-      return result
+
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=GET_HIDDEN_CLASS_ID_SELECTORS requestId=$reqId")
+      return org.mozilla.geckoview.GeckoResult.fromValue(resp)
     }
 
     if (type != "SHOULD_BLOCK") {
       Log.w(TAG, "[WEBEXT_UNSUPPORTED_TYPE] type=$type")
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=$type requestId=$reqId")
       return org.mozilla.geckoview.GeckoResult.fromValue(
         JSONObject().apply {
           put("ok", false)
@@ -341,6 +333,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
     if (url.isBlank()) {
       Log.e(TAG, "[WEBEXT_PROTOCOL_ERROR] empty_url")
+      Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$reqId")
       return org.mozilla.geckoview.GeckoResult.fromValue(
         JSONObject().apply {
           put("ok", false)
@@ -350,71 +343,58 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
       )
     }
 
-    val result = org.mozilla.geckoview.GeckoResult<Any>()
+    val responseJson = try {
+      Log.d(
+        TAG,
+        "[WEBEXT_NATIVE_DECISION_START] type=$resourceType urlLen=${url.length} reqId=$reqId"
+      )
 
-    extensionScope.launch {
-      try {
-        Log.d(
-          TAG,
-          "[WEBEXT_NATIVE_DECISION_START] type=$resourceType urlLen=${url.length}"
+      val sourceHost = try {
+        if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
+      } catch (_: Exception) { null }
+      val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+
+      val decision = if (bypass) {
+        BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
+      } else {
+        adblockBridge.evaluateDecision(
+          url = url,
+          sourceUrl = sourceUrl,
+          initiator = initiator,
+          method = method,
+          resourceType = resourceType,
+          aggressive = aggressive,
+          thirdParty = thirdParty
         )
+      }
 
-        val sourceHost = try {
-          if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
-        } catch (_: Exception) { null }
-        val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+      Log.d(
+        TAG,
+        "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=${decision.blocked} bypass=$bypass rule=${decision.ruleId} src=${decision.ruleSource}"
+      )
 
-        val decision = if (bypass) {
-          BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
-        } else {
-          adblockBridge.evaluateDecision(
-            url = url,
-            sourceUrl = sourceUrl,
-            initiator = initiator,
-            method = method,
-            resourceType = resourceType,
-            aggressive = aggressive,
-            thirdParty = thirdParty
-          )
-        }
-
-        Log.d(
-          TAG,
-          "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=${decision.blocked} bypass=$bypass rule=${decision.ruleId} src=${decision.ruleSource}"
-        )
-
-        result.complete(
-          JSONObject().apply {
-            put("ok", true)
-            put("cancel", decision.blocked)
-            if (decision.ruleId != null) put("ruleId", decision.ruleId)
-            if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
-            put("generation", decision.engineGeneration)
-          }
-        )
-
-        Log.d(
-          TAG,
-          "[WEBEXT_NATIVE_COMPLETE] type=$resourceType"
-        )
-      } catch (t: Throwable) {
-        Log.e(
-          TAG,
-          "[WEBEXT_NATIVE_EXCEPTION] type=$resourceType error=${t.javaClass.name}: ${t.message}",
-          t
-        )
-
-        result.complete(
-          JSONObject().apply {
-            put("ok", false)
-            put("error", "native_exception")
-            put("cancel", false)
-          }
-        )
+      JSONObject().apply {
+        put("ok", true)
+        put("cancel", decision.blocked)
+        if (decision.ruleId != null) put("ruleId", decision.ruleId)
+        if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
+        put("generation", decision.engineGeneration)
+      }
+    } catch (t: Throwable) {
+      Log.e(
+        TAG,
+        "[WEBEXT_NATIVE_EXCEPTION] type=$resourceType error=${t.javaClass.name}: ${t.message}",
+        t
+      )
+      JSONObject().apply {
+        put("ok", false)
+        put("error", "native_exception")
+        put("cancel", false)
       }
     }
 
-    return result
+    Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$reqId")
+    return org.mozilla.geckoview.GeckoResult.fromValue(responseJson)
   }
 
   override fun onConnect(port: WebExtension.Port) {

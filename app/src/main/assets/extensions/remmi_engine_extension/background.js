@@ -37,17 +37,74 @@ function withTimeout(promise, timeoutMs) {
   ]);
 }
 
+async function runPingBenchmark(count = 100) {
+  const latencies = [];
+  let successes = 0;
+  let failures = 0;
+
+  for (let i = 0; i < count; i++) {
+    const reqId = `ping_${i}_${Date.now()}`;
+    const start = Date.now();
+    try {
+      logToNative(`[NM_SEND_START] requestId=${reqId} messageType=PING`);
+      const res = await withTimeout(
+        browser.runtime.sendNativeMessage("remmi_engine_extension", {
+          type: "PING",
+          requestId: reqId
+        }),
+        1500
+      );
+      const elapsed = Date.now() - start;
+      if (res && res.ok === true && res.pong === true) {
+        successes++;
+        latencies.push(elapsed);
+        logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
+      } else {
+        failures++;
+        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=bad_pong`);
+      }
+    } catch (e) {
+      failures++;
+      let errName = "NATIVE_MESSAGE_FAILURE";
+      if (e?.message === "native_timeout") errName = "NATIVE_TIMEOUT";
+      logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
+    }
+  }
+
+  latencies.sort((a, b) => a - b);
+  const p50 = latencies.length > 0 ? latencies[Math.floor(latencies.length * 0.5)] : 0;
+  const p95 = latencies.length > 0 ? latencies[Math.floor(latencies.length * 0.95)] : 0;
+  const max = latencies.length > 0 ? latencies[latencies.length - 1] : 0;
+
+  logToNative(`[WEBEXT_PING_BENCHMARK] count=${count} success=${successes} failure=${failures} p50=${p50}ms p95=${p95}ms max=${max}ms`);
+  return { successes, failures, p50, p95, max };
+}
+
 async function nativePing() {
+  const reqId = `ping_init_${Date.now()}`;
   try {
+    logToNative(`[NM_SEND_START] requestId=${reqId} messageType=PING`);
+    const startTs = Date.now();
     const res = await withTimeout(
       browser.runtime.sendNativeMessage("remmi_engine_extension", {
-        type: "PING"
+        type: "PING",
+        requestId: reqId
       }),
       1500
     );
-    logToNative(`[WEBEXT_PING_RESULT] ok=${res?.ok} pong=${res?.pong}`);
+    const elapsed = Date.now() - startTs;
+    if (res && res.ok === true) {
+      logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
+      logToNative(`[WEBEXT_PING_RESULT] ok=true pong=${res.pong}`);
+    } else {
+      logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=invalid_response`);
+      logToNative(`[WEBEXT_PING_RESULT] ok=false pong=false`);
+    }
     return res;
   } catch (e) {
+    let errName = "NATIVE_MESSAGE_FAILURE";
+    if (e?.message === "native_timeout") errName = "NATIVE_TIMEOUT";
+    logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
     logToNative(`[WEBEXT_PING_ERROR] error=${e?.message || String(e)}`);
     return null;
   }
@@ -126,6 +183,8 @@ function connectNative() {
             console.error("[Remmi] EXECUTE_SCRIPT failed", e);
           });
         }
+      } else if (msg.type === "RUN_BENCHMARK") {
+        runPingBenchmark(msg.count || 100);
       }
     });
 
@@ -233,11 +292,15 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
     }
 
+    const reqId = "cosmetic_" + Math.random().toString(36).substring(2, 9);
     const promise = (async () => {
       try {
+        logToNative(`[NM_SEND_START] requestId=${reqId} messageType=GET_COSMETIC_RESOURCES`);
+        const startTs = Date.now();
         const resp = await withTimeout(
           browser.runtime.sendNativeMessage("remmi_engine_extension", {
             type: "GET_COSMETIC_RESOURCES",
+            requestId: reqId,
             url: url,
             hostname: hostname,
             classes: message.classes || [],
@@ -246,11 +309,17 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }),
           2000
         );
+        const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
+          logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
           setCachedCosmetic(cacheKey, resp);
+        } else {
+          logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
+        let errCategory = e?.message === "native_timeout" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
+        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
         logToNative(`[WEBEXT_COSMETIC_ERROR] error=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
@@ -289,22 +358,32 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
     }
 
+    const reqId = "classid_" + Math.random().toString(36).substring(2, 9);
     const promise = (async () => {
       try {
+        logToNative(`[NM_SEND_START] requestId=${reqId} messageType=GET_HIDDEN_CLASS_ID_SELECTORS`);
+        const startTs = Date.now();
         const resp = await withTimeout(
           browser.runtime.sendNativeMessage("remmi_engine_extension", {
             type: "GET_HIDDEN_CLASS_ID_SELECTORS",
+            requestId: reqId,
             classes: classes,
             ids: ids,
             exceptions: message.exceptions || []
           }),
           2000
         );
+        const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
+          logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
           setCachedCosmetic(cacheKey, resp);
+        } else {
+          logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
+        let errCategory = e?.message === "native_timeout" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
+        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
         logToNative(`[WEBEXT_COSMETIC_CLASS_ERROR] error=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
@@ -333,7 +412,7 @@ const MAX_CACHE_SIZE = 800;
 const CACHE_TTL_MS = 300000; // 5 minutes default
 const NATIVE_DECISION_TIMEOUT_MS = 1500;
 
-// STEP 2: Blockable resource types policy (websocket intentionally excluded for separate lifecycle handling)
+// Blockable resource types policy
 const BLOCKABLE_TYPES = new Set([
   "main_frame",
   "sub_frame",
@@ -370,12 +449,12 @@ function getCacheTtl(resourceType) {
       return 5 * 60 * 1000;
     case "image":
     case "imageset":
-    case "media",
-  "beacon",
-  "ping",
-  "csp_report",
-  "websocket",
-  "other":
+    case "media":
+    case "beacon":
+    case "ping":
+    case "csp_report":
+    case "websocket":
+    case "other":
       return 2 * 60 * 1000;
     case "main_frame":
     case "sub_frame":
@@ -426,7 +505,29 @@ function buildDecisionKey(details) {
   ].join("|");
 }
 
-async function getNativeDecision(details, cacheKey) {
+function calculateIsThirdParty(targetUrl, sourceUrl) {
+  try {
+    if (!sourceUrl || !targetUrl) return false;
+    const target = new URL(targetUrl);
+    const source = new URL(sourceUrl);
+    const targetHost = target.hostname.toLowerCase();
+    const sourceHost = source.hostname.toLowerCase();
+    if (!targetHost || !sourceHost) return false;
+    if (targetHost === sourceHost) return false;
+    const tParts = targetHost.split('.');
+    const sParts = sourceHost.split('.');
+    if (tParts.length >= 2 && sParts.length >= 2) {
+      const tBase = tParts.slice(-2).join('.');
+      const sBase = sParts.slice(-2).join('.');
+      if (tBase === sBase) return false;
+    }
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+async function getNativeDecision(details, cacheKey, requestId) {
   if (INFLIGHT_DECISIONS.has(cacheKey)) {
     BLOCKER_METRICS.inflightHits++;
     logToNative(
@@ -437,33 +538,51 @@ async function getNativeDecision(details, cacheKey) {
 
   const promise = (async () => {
     BLOCKER_METRICS.nativeCalls++;
-    // We pass the raw URLs to the native Rust engine, which uses a 
-    // complete Public Suffix List (PSL) to correctly identify eTLD+1 
-    // matching and third-party status.
     const sourceUrl = details.documentUrl || details.originUrl || "";
-    
-    const response = await withTimeout(
-      browser.runtime.sendNativeMessage(
-        "remmi_engine_extension",
-        {
-          type: "SHOULD_BLOCK",
-          url: details.url,
-          sourceUrl: sourceUrl,
-          initiator: details.originUrl || "",
-          method: details.method || "GET",
-          resourceType: details.type || "other",
-          aggressive: currentProfile === "GHOST" || currentProfile === "TOR",
-          thirdParty: true // Placeholder, Rust engine does the real eTLD+1 calculation
-        }
-      ),
-      NATIVE_DECISION_TIMEOUT_MS
-    );
+    const is3p = calculateIsThirdParty(details.url, sourceUrl);
+    const reqId = requestId || ("req_" + Math.random().toString(36).substring(2, 9));
+    const startTs = Date.now();
+
+    logToNative(`[NM_SEND_START] requestId=${reqId} messageType=SHOULD_BLOCK`);
+
+    let response;
+    try {
+      response = await withTimeout(
+        browser.runtime.sendNativeMessage(
+          "remmi_engine_extension",
+          {
+            type: "SHOULD_BLOCK",
+            requestId: reqId,
+            url: details.url,
+            sourceUrl: sourceUrl,
+            initiator: details.originUrl || "",
+            method: details.method || "GET",
+            resourceType: details.type || "other",
+            aggressive: currentProfile === "GHOST" || currentProfile === "TOR",
+            thirdParty: is3p
+          }
+        ),
+        NATIVE_DECISION_TIMEOUT_MS
+      );
+    } catch (e) {
+      let errName = "NATIVE_MESSAGE_FAILURE";
+      if (e?.message === "native_timeout") {
+        errName = "NATIVE_TIMEOUT";
+      }
+      logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
+      throw e;
+    }
+
+    const elapsedMs = Date.now() - startTs;
 
     if (!response || response.ok !== true) {
-      throw new Error(
-        `native_decision_invalid:${response?.error || "unknown"}`
-      );
+      const errName = response ? "NATIVE_DECISION_FAILURE" : "INVALID_NATIVE_RESPONSE";
+      const errMsg = response?.error || "null_or_invalid_response";
+      logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${errMsg}`);
+      throw new Error(`native_decision_invalid:${errMsg}`);
     }
+
+    logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsedMs}`);
 
     if (response.generation && response.generation > rulesGeneration) {
       rulesGeneration = response.generation;
@@ -540,19 +659,21 @@ browser.webRequest.onBeforeRequest.addListener(
       `[WEBEXT_CACHE_MISS] type=${resType} method=${method}`
     );
 
-    try {
-      // --- TRACE ---
-      if (url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager")) {
-        const traceId = details.requestId || Math.random().toString(36).substring(7);
-        logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
-        
-        const traceResponse = await getNativeDecision(details, cacheKey);
-        logToNative(`[AB_ENFORCEMENT_RESULT] requestId=${traceId} cancel=${traceResponse.cancel}`);
-      }
-      // --- END TRACE ---
+    const traceId = details.requestId || Math.random().toString(36).substring(7);
+    const isTraceCandidate = url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager");
+    if (isTraceCandidate) {
+      logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
+    }
 
-      const response = await getNativeDecision(details, cacheKey);
+    try {
+      // Execute single getNativeDecision call per request (NO duplicate decision calls)
+      const response = await getNativeDecision(details, cacheKey, traceId);
       const shouldCancel = response.cancel === true;
+
+      if (isTraceCandidate) {
+        logToNative(`[AB_ENFORCEMENT_RESULT] requestId=${traceId} cancel=${shouldCancel}`);
+      }
+
       if (isIdempotent && !response.redirect && !response.rewrittenUrl && !response.csp) {
         setCachedDecision(cacheKey, shouldCancel, resType);
       }
@@ -561,8 +682,6 @@ browser.webRequest.onBeforeRequest.addListener(
       
       if (shouldCancel) {
         BLOCKER_METRICS.blocked++;
-        // NOTE: We no longer post "BLOCKED" URL messages from the hot path
-        // to avoid I/O bottlenecks.
       } else if (response.redirect) {
         finalResult = { redirectUrl: response.redirect };
       } else if (response.rewrittenUrl) {
@@ -570,9 +689,6 @@ browser.webRequest.onBeforeRequest.addListener(
       }
       
       if (response.csp) {
-        // CSP injection requires onHeadersReceived modifying response headers.
-        // Returning it in onBeforeRequest does nothing in standard WebExtensions.
-        // Marking it PARTIAL.
         logToNative(`[WEBEXT_PARTIAL] unsupported action: csp`);
       }
 
@@ -589,8 +705,18 @@ browser.webRequest.onBeforeRequest.addListener(
           `[WEBEXT_METRICS] requests=${BLOCKER_METRICS.requests} cacheHits=${BLOCKER_METRICS.cacheHits} inflightHits=${BLOCKER_METRICS.inflightHits} nativeCalls=${BLOCKER_METRICS.nativeCalls} errors=${BLOCKER_METRICS.nativeErrors} blocked=${BLOCKER_METRICS.blocked}`
         );
       }
+      
+      let errorCategory = "NATIVE_MESSAGE_FAILURE";
+      if (e?.message === "native_timeout" || e?.name === "TimeoutError") {
+        errorCategory = "NATIVE_TIMEOUT";
+      } else if (e?.message?.startsWith("native_decision_invalid")) {
+        errorCategory = "INVALID_NATIVE_RESPONSE";
+      } else if (e?.message?.startsWith("native_decision_failure")) {
+        errorCategory = "NATIVE_DECISION_FAILURE";
+      }
+
       logToNative(
-        `[WEBEXT_NATIVE_ERROR] type=${resType} name=${e?.name || "unknown"} message=${e?.message || String(e)}`
+        `[WEBEXT_NATIVE_ERROR] type=${resType} name=${errorCategory} message=${e?.message || String(e)}`
       );
 
       /*
