@@ -117,12 +117,12 @@ object CrashHandlerHelper {
               val reason = exitReasons[0]
               val reasonStr = when (reason.reason) {
                 android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH"
-                android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "NATIVE_CRASH (SIGSEGV/SIGABRT/SIGBUS/SIGILL)"
+                android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "NATIVE_FATAL_SIGNAL"
                 android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
-                android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "OOM (LOW_MEMORY)"
-                android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
-                android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
-                else -> "UNKNOWN (${reason.reason})"
+                android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "OOM"
+                android.app.ApplicationExitInfo.REASON_SIGNALED -> "SYSTEM_KILL"
+                android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED_TERMINATION"
+                else -> "UNKNOWN"
               }
               nativeSignal = "$reasonStr - ${reason.description ?: "No description"}"
               try {
@@ -589,6 +589,7 @@ object CrashHandlerHelper {
     }
 
     val nativeSignal = try { context.getSystemService("abnormal_signal") as? String ?: "UNKNOWN" } catch(_: Throwable) { "UNKNOWN" }
+    val classification = nativeSignal.substringBefore(" - ")
     val tombstoneText = try { context.getSystemService("tombstone_text") as? String ?: "UNAVAILABLE" } catch(_: Throwable) { "UNAVAILABLE" }
 
     return """
@@ -657,7 +658,7 @@ $stackTrace
 
 NATIVE CRASH:
 ${if (throwable == null) """
-NATIVE_PROCESS_TERMINATION_SUSPECTED
+$classification
 Signal/Reason: $nativeSignal
 Last native operation: $displayLastNativeOp
 NO JAVA EXCEPTION CAPTURED.

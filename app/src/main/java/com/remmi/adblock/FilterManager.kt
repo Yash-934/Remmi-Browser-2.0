@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -205,67 +206,93 @@ class FilterManager(
   private var isRulesLoaded = false
   private var cachedRulesCount = 0
 
-  private suspend fun loadPersistedRulesIntoBridgeAsync(): Int = withContext(Dispatchers.IO) {
-    mutex.withLock {
+  private var compileDeferred: kotlinx.coroutines.Deferred<Int>? = null
+  private var compileJobId = 0L
+
+  private suspend fun loadPersistedRulesIntoBridgeAsync(source: String = "unknown"): Int {
+    val reqJobId = System.currentTimeMillis()
+    Log.d(TAG, "[COMPILE_REQUEST] source=$source generation=${adblockBridge.getEngineGeneration()} jobId=$reqJobId")
+
+    val deferred = mutex.withLock {
       if (isRulesLoaded) {
-        return@withLock cachedRulesCount
+        return@withLock null
       }
-      val dir = filterDir ?: return@withLock 0
-      Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
-      val defaultRules = StringBuilder()
-      val additionalRules = StringBuilder()
-      val rulesSummary = StringBuilder()
-      for (sub in _subscriptions.value) {
-        if (sub.enabled) {
-          val file = File(dir, "${sub.id}.txt")
-          if (file.exists() && file.length() > 0) {
-            try {
-              val content = file.readText()
-              val lines = content.lines()
-              val lineCount = lines.count { it.isNotBlank() && !it.startsWith("!") }
-              Log.d(TAG, "[ADBLOCK_PARSE] name=${sub.id} inputLines=${lines.size} validRules=$lineCount")
-              Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} rules=$lineCount")
-              rulesSummary.append("${sub.id}=$lineCount ")
-              if (sub.id == "easylist" || sub.id == "easyprivacy") {
-                defaultRules.append(content).append("\n")
-              } else {
-                additionalRules.append(content).append("\n")
-              }
-            } catch (e: Exception) {
-              Log.e(TAG, "Failed reading cached filter ${sub.id}: ${e.message}")
+      var active = compileDeferred
+      if (active == null) {
+        compileJobId = reqJobId
+        active = CoroutineScope(Dispatchers.Default).async {
+          doCompileRules(reqJobId)
+        }
+        compileDeferred = active
+      } else {
+        Log.d(TAG, "[COMPILE_WAIT_EXISTING] jobId=$compileJobId")
+      }
+      active
+    }
+    
+    return deferred?.await() ?: cachedRulesCount
+  }
+
+  private suspend fun doCompileRules(jobId: Long): Int = withContext(Dispatchers.Default) {
+    Log.d(TAG, "[COMPILE_ENTER] thread=${Thread.currentThread().name} inputBytes=unknown")
+    val dir = filterDir ?: return@withContext 0
+    Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
+    val defaultRules = StringBuilder()
+    val additionalRules = StringBuilder()
+    val rulesSummary = StringBuilder()
+    for (sub in _subscriptions.value) {
+      if (sub.enabled) {
+        val file = File(dir, "${sub.id}.txt")
+        if (file.exists() && file.length() > 0) {
+          try {
+            val content = file.readText()
+            val lines = content.lines()
+            val lineCount = lines.count { it.isNotBlank() && !it.startsWith("!") }
+            Log.d(TAG, "[ADBLOCK_PARSE] name=${sub.id} inputLines=${lines.size} validRules=$lineCount")
+            Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} rules=$lineCount")
+            rulesSummary.append("${sub.id}=$lineCount ")
+            if (sub.id == "easylist" || sub.id == "easyprivacy") {
+              defaultRules.append(content).append("\n")
+            } else {
+              additionalRules.append(content).append("\n")
             }
-          } else {
-            Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} cached=false fallback_count=0")
-            rulesSummary.append("${sub.id}=(cached:false) ")
+          } catch (e: Exception) {
+            Log.e(TAG, "Failed reading cached filter ${sub.id}: ${e.message}")
           }
+        } else {
+          Log.d(TAG, "[ADBLOCK_FILTER_PARSE] list=${sub.id} cached=false fallback_count=0")
+          rulesSummary.append("${sub.id}=(cached:false) ")
         }
       }
-      if (defaultRules.isNotBlank() || additionalRules.isNotBlank()) {
-        val compiled = adblockBridge.compileRules(defaultRules.toString(), additionalRules.toString())
-        Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
-        Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
-        logAdblockStatus()
-        isRulesLoaded = true
-        cachedRulesCount = compiled
-        return@withLock compiled
-      } else {
-        Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=0 (using default tracker rules)")
-        logAdblockStatus()
-      }
-      isRulesLoaded = true
-      cachedRulesCount = 0
-      return@withLock 0
     }
+    
+    var compiled = 0
+    if (defaultRules.isNotBlank() || additionalRules.isNotBlank()) {
+      compiled = adblockBridge.compileRules(defaultRules.toString(), additionalRules.toString())
+      Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
+      Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
+      logAdblockStatus()
+    } else {
+      Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=0 (using default tracker rules)")
+      logAdblockStatus()
+    }
+    
+    mutex.withLock {
+      isRulesLoaded = true
+      cachedRulesCount = compiled
+      compileDeferred = null
+    }
+    compiled
   }
 
   private fun loadPersistedRulesIntoBridge() {
     CoroutineScope(Dispatchers.IO).launch {
-      loadPersistedRulesIntoBridgeAsync()
+      loadPersistedRulesIntoBridgeAsync("init")
     }
   }
 
   suspend fun ensureFiltersReady(): Boolean = withContext(Dispatchers.IO) {
-    val cachedRulesCount = loadPersistedRulesIntoBridgeAsync()
+    val cachedRulesCount = loadPersistedRulesIntoBridgeAsync("ensureFiltersReady")
     val allDefaultCached = defaultList.all { sub ->
       val file = filterDir?.let { File(it, "${sub.id}.txt") }
       file != null && file.exists() && file.length() > 0
@@ -295,7 +322,7 @@ class FilterManager(
           if (!res) successAll = false
         }
       }
-      val compiledCount = loadPersistedRulesIntoBridgeAsync()
+      val compiledCount = loadPersistedRulesIntoBridgeAsync("updateAllSubscriptions")
       if (compiledCount <= 0) {
         Log.w(TAG, "[ADBLOCK] Subscriptions update completed but compiled count is $compiledCount")
       }

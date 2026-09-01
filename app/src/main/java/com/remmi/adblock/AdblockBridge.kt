@@ -592,24 +592,64 @@ class AdblockBridge {
     com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
     Log.d(TAG, "[COMPILE_START] validLines=${validLines.size} oldGeneration=$oldGen")
     if (isNativeLoaded) {
+      val rt = Runtime.getRuntime()
+      val javaUsedBefore = rt.totalMemory() - rt.freeMemory()
+      Log.d(TAG, "[COMPILE_ENTER] thread=${Thread.currentThread().name} inputBytes=${combinedDefaultRulesText.length + additionalRulesText.length} javaHeapUsedBefore=$javaUsedBefore")
+      
+      var isDone = false
+      val inputBytes = combinedDefaultRulesText.length + additionalRulesText.length
+      val ruleCount = validLines.size
+      val watchdog = Thread({
+        val thresholds = listOf(1000L, 5000L, 10000L, 30000L, 60000L)
+        val startTime = System.currentTimeMillis()
+        var nextIdx = 0
+        while (!isDone && nextIdx < thresholds.size) {
+            val targetWait = thresholds[nextIdx]
+            val elapsed = System.currentTimeMillis() - startTime
+            val toWait = targetWait - elapsed
+            if (toWait > 0) {
+                try { Thread.sleep(toWait) } catch (e: InterruptedException) { break }
+            }
+            if (!isDone) {
+                Log.w(TAG, "[COMPILE_WATCHDOG] elapsedMs=${System.currentTimeMillis() - startTime}")
+                if (targetWait == 60000L) {
+                    val r = Runtime.getRuntime()
+                    Log.e(TAG, "[COMPILE_WATCHDOG_TIMEOUT] inputBytes=$inputBytes ruleCount=$ruleCount thread=${Thread.currentThread().name} memoryUsed=${r.totalMemory() - r.freeMemory()} memoryMax=${r.maxMemory()}")
+                }
+            }
+            nextIdx++
+        }
+      }, "CompileWatchdog")
+      watchdog.start()
+
       try {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
         val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+        val javaUsedAfter = rt.totalMemory() - rt.freeMemory()
+        Log.d(TAG, "[COMPILE_PARSE_DONE] parsedRules=${validLines.size} javaHeapUsedAfter=$javaUsedAfter")
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
+        
         val metricsObj = org.json.JSONObject(metricsJson)
         compiledCount = metricsObj.optInt("parsedCandidates", 0)
         Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
+        
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
+        Log.d(TAG, "[COMPILE_ENGINE_CREATED] javaHeapUsedAfter=$javaUsedAfter")
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
       } catch (e: Throwable) {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
         Log.e(TAG, "Native compile rules failed: ${e.message}", e)
+      } finally {
+        isDone = true
+        watchdog.interrupt()
       }
     }
     com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
+    Log.d(TAG, "[COMPILE_SWAP_START]")
     val newGen = localEngineGeneration.incrementAndGet()
     Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
     com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
+    Log.d(TAG, "[COMPILE_SWAP_DONE]")
 
     blockedHostnames.clear()
     blockedSubstrings.clear()
