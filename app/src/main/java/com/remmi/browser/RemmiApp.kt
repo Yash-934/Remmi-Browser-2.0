@@ -67,23 +67,16 @@ class RemmiApp : Application(), SingletonImageLoader.Factory {
         Log.i("RemmiApp", "Background initialization started...")
         val bridge = AdblockBridge.getInstance()
         bridge.initEngine()
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.REMMI_APP_DATABASE_BOOTSTRAP_CALL)
         RemmiDatabase.bootstrap(this)
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.REMMI_APP_SETTINGS_INIT_START)
         SettingsRepository.getInstance(this)
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.REMMI_APP_SETTINGS_INIT_END)
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.REMMI_APP_FILTER_MANAGER_INIT_START)
         val filterManager = com.remmi.adblock.FilterManager.getInstance(this, bridge)
         kotlinx.coroutines.runBlocking {
           try {
-            com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this@RemmiApp, com.remmi.browser.util.StartupPhase.REMMI_APP_FILTER_ENSURE_READY_START)
             filterManager.ensureFiltersReady()
-            com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this@RemmiApp, com.remmi.browser.util.StartupPhase.REMMI_APP_FILTER_ENSURE_READY_END)
           } catch (e: Throwable) {
             Log.w("RemmiApp", "[ADBLOCK] Background filter bootstrap error: ${e.message}")
           }
         }
-        com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(this, com.remmi.browser.util.StartupPhase.REMMI_APP_BACKGROUND_INIT_END)
         Log.i("RemmiApp", "Background initialization completed.")
       } catch (e: Throwable) {
         Log.e("RemmiApp", "Error during background init: ${e.message}", e)

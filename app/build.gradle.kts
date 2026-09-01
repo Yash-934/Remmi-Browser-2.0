@@ -71,7 +71,6 @@ android {
     }
     jniLibs {
       keepDebugSymbols.add("**/libadblock_rust.so")
-      keepDebugSymbols.add("**/libcrash_forensics.so")
     }
   }
   compileOptions {
@@ -86,11 +85,6 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
-  }
-  externalNativeBuild {
-    cmake {
-      path("src/main/cpp/CMakeLists.txt")
-    }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {

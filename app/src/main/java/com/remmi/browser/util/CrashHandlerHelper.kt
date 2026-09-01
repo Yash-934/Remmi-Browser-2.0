@@ -36,16 +36,6 @@ enum class StartupPhase(val id: String) {
   DATABASE_SQLCIPHER_OPEN_START("DATABASE_SQLCIPHER_OPEN_START"),
   DATABASE_SQLCIPHER_OPEN_OK("DATABASE_SQLCIPHER_OPEN_OK"),
   DATABASE_SQLCIPHER_OPEN_FAILED("DATABASE_SQLCIPHER_OPEN_FAILED"),
-  REMMI_APP_PW_MANAGER_DB_QUERY_START("REMMI_APP_PW_MANAGER_DB_QUERY_START"),
-  REMMI_APP_PW_MANAGER_DB_QUERY_END("REMMI_APP_PW_MANAGER_DB_QUERY_END"),
-  REMMI_APP_PW_MANAGER_DB_QUERY_ERROR("REMMI_APP_PW_MANAGER_DB_QUERY_ERROR"),
-  REMMI_APP_DATABASE_BOOTSTRAP_CALL("REMMI_APP_DATABASE_BOOTSTRAP_CALL"),
-  REMMI_APP_SETTINGS_INIT_START("REMMI_APP_SETTINGS_INIT_START"),
-  REMMI_APP_SETTINGS_INIT_END("REMMI_APP_SETTINGS_INIT_END"),
-  REMMI_APP_FILTER_MANAGER_INIT_START("REMMI_APP_FILTER_MANAGER_INIT_START"),
-  REMMI_APP_FILTER_ENSURE_READY_START("REMMI_APP_FILTER_ENSURE_READY_START"),
-  REMMI_APP_FILTER_ENSURE_READY_END("REMMI_APP_FILTER_ENSURE_READY_END"),
-  REMMI_APP_BACKGROUND_INIT_END("REMMI_APP_BACKGROUND_INIT_END"),
   MAIN_ACTIVITY_CREATE("MAIN_ACTIVITY_CREATE"),
   BROWSER_SCREEN_COMPOSE("BROWSER_SCREEN_COMPOSE"),
   GECKO_MANAGER_CONSTRUCT_START("GECKO_MANAGER_CONSTRUCT_START"),
@@ -63,18 +53,6 @@ data class CrashExportResult(
 )
 
 object CrashHandlerHelper {
-  init {
-    try {
-      System.loadLibrary("crash_forensics")
-      installNativeCrashHandler()
-    } catch (e: Throwable) {
-      android.util.Log.e("CrashHandlerHelper", "Failed to load crash_forensics lib", e)
-    }
-  }
-
-  @JvmStatic
-  external fun installNativeCrashHandler()
-
   private const val TAG = "CrashHandlerHelper"
   const val PREFS_NAME = "remmi_crash_reports"
 
@@ -214,13 +192,11 @@ object CrashHandlerHelper {
     abi: String? = null
   ) {
     try {
-      val currentThread = Thread.currentThread()
-      val enhancedOp = "$op (Thread: ${currentThread.name}, ID: ${currentThread.id})"
-      lastNativeOperation = enhancedOp
+      lastNativeOperation = op
       val ctx = context?.applicationContext ?: appContext
       if (ctx != null) {
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val editor = prefs.edit().putString(KEY_LAST_NATIVE_OP, enhancedOp)
+        val editor = prefs.edit().putString(KEY_LAST_NATIVE_OP, op)
         if (apiVersion != null) editor.putString(KEY_NATIVE_API_VERSION, apiVersion)
         if (buildId != null) editor.putString(KEY_NATIVE_BUILD_ID, buildId)
         if (abi != null) editor.putString(KEY_NATIVE_ABI, abi)
