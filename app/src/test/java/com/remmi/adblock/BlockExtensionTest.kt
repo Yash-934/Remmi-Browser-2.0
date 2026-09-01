@@ -267,4 +267,56 @@ class BlockExtensionTest {
     assertTrue("All threads must finish within 10s", latch.await(10, TimeUnit.SECONDS))
     assertEquals("All 100 concurrent requests must receive exact matching response", count, responseSuccess.get())
   }
+
+  @Test
+  fun testConcurrentLoadTiers() {
+    val tiers = listOf(1, 5, 10, 25, 50, 100, 250)
+
+    for (tier in tiers) {
+      val latch = CountDownLatch(tier)
+      val latenciesNanos = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+      val successCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+      val threads = (0 until tier).map { i ->
+        Thread {
+          try {
+            val isBlock = i % 2 == 0
+            val url = if (isBlock) "https://www.google-analytics.com/analytics.js?t=$i" else "https://example.com/style_$i.css"
+            val msg = JSONObject().apply {
+              put("type", "SHOULD_BLOCK")
+              put("requestId", "tier_${tier}_req_$i")
+              put("url", url)
+              put("sourceUrl", "https://adblock-tester.com/")
+              put("resourceType", if (isBlock) "script" else "stylesheet")
+              put("thirdParty", isBlock)
+            }
+            val start = System.nanoTime()
+            val result = blockExtension.onMessage("remmi_engine_extension", msg, mockSender)
+            val json = extractResult(result)
+            val elapsed = System.nanoTime() - start
+            latenciesNanos.add(elapsed)
+            if (json != null && json.optBoolean("ok", false)) {
+              successCount.incrementAndGet()
+            }
+          } finally {
+            latch.countDown()
+          }
+        }
+      }
+
+      val totalElapsedMs = measureNanoTime {
+        threads.forEach { it.start() }
+        assertTrue("Tier $tier must complete within 15s", latch.await(15, TimeUnit.SECONDS))
+      } / 1_000_000.0
+
+      val latenciesMs = latenciesNanos.map { it / 1_000_000.0 }.sorted()
+      val p50 = latenciesMs[(latenciesMs.size * 0.50).toInt().coerceAtMost(latenciesMs.size - 1)]
+      val p95 = latenciesMs[(latenciesMs.size * 0.95).toInt().coerceAtMost(latenciesMs.size - 1)]
+      val p99 = latenciesMs[(latenciesMs.size * 0.99).toInt().coerceAtMost(latenciesMs.size - 1)]
+      val max = latenciesMs.last()
+
+      println("[LOAD_BENCHMARK] Tier=$tier concurrent | Success=${successCount.get()}/$tier | Total=${"%.2f".format(totalElapsedMs)}ms | p50=${"%.2f".format(p50)}ms | p95=${"%.2f".format(p95)}ms | p99=${"%.2f".format(p99)}ms | max=${"%.2f".format(max)}ms")
+      assertEquals("All requests in tier $tier must succeed", tier, successCount.get())
+    }
+  }
 }

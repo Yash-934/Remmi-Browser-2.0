@@ -150,9 +150,20 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
       )
     }
 
+    val receiveTs = System.currentTimeMillis()
     val type = messageJson.optString("type")
     val reqId = messageJson.optString("requestId").ifEmpty { "n/a" }
-    Log.d(TAG, "[NM_RECEIVE] type=$type requestId=$reqId")
+    val candidateUrl = messageJson.optString("url")
+    val isTraceCandidate = candidateUrl.contains("google-analytics") || 
+                           candidateUrl.contains("adblock-tester") || 
+                           candidateUrl.contains("googletagmanager") || 
+                           candidateUrl.contains("banner") ||
+                           type == "SHOULD_BLOCK"
+
+    if (isTraceCandidate || type == "PING" || type == "GET_COSMETIC_RESOURCES" || type == "GET_HIDDEN_CLASS_ID_SELECTORS") {
+      Log.d(TAG, "[NM_NATIVE_RECEIVE] requestId=$reqId type=$type ts=$receiveTs")
+      Log.d(TAG, "[NM_NATIVE_HANDLER_START] requestId=$reqId")
+    }
 
     if (type == "PING") {
       Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=PING requestId=$reqId")
@@ -349,6 +360,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
         "[WEBEXT_NATIVE_DECISION_START] type=$resourceType urlLen=${url.length} reqId=$reqId"
       )
 
+      val handlerStartNs = System.nanoTime()
       val sourceHost = try {
         if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
       } catch (_: Exception) { null }
@@ -364,22 +376,27 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           method = method,
           resourceType = resourceType,
           aggressive = aggressive,
-          thirdParty = thirdParty
+          thirdParty = thirdParty,
+          requestId = reqId
         )
       }
+      val handlerElapsedNs = System.nanoTime() - handlerStartNs
 
       Log.d(
         TAG,
         "[WEBEXT_NATIVE_DECISION_END] type=$resourceType blocked=${decision.blocked} bypass=$bypass rule=${decision.ruleId} src=${decision.ruleSource}"
       )
+      Log.d(TAG, "[NM_NATIVE_HANDLER_END] requestId=$reqId handlerNs=$handlerElapsedNs")
 
-      JSONObject().apply {
+      val json = JSONObject().apply {
         put("ok", true)
         put("cancel", decision.blocked)
         if (decision.ruleId != null) put("ruleId", decision.ruleId)
         if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
         put("generation", decision.engineGeneration)
       }
+      Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$reqId cancel=${decision.blocked}")
+      json
     } catch (t: Throwable) {
       Log.e(
         TAG,

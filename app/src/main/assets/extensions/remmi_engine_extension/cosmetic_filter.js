@@ -97,8 +97,8 @@
   function flushDynamicSelectors() {
     if (pendingClasses.length === 0 && pendingIds.length === 0) return;
 
-    const classesToSend = pendingClasses.splice(0, 200);
-    const idsToSend = pendingIds.splice(0, 200);
+    const classesToSend = pendingClasses.splice(0, 100);
+    const idsToSend = pendingIds.splice(0, 100);
 
     try {
       browser.runtime
@@ -120,8 +120,15 @@
               injectSelectors(allHide);
             }
           }
+          if (pendingClasses.length > 0 || pendingIds.length > 0) {
+            scheduleScan();
+          }
         })
-        .catch((_e) => {});
+        .catch((_e) => {
+          if (pendingClasses.length > 0 || pendingIds.length > 0) {
+            scheduleScan();
+          }
+        });
     } catch (_e) {}
   }
 

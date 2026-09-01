@@ -81,4 +81,34 @@ class AdblockBridgeTest {
     val allowedDec = bridge.evaluateDecision("https://safe.custom-adnetwork.net/script.js")
     assertFalse("safe.custom-adnetwork.net must be allowed via exception", allowedDec.blocked)
   }
+
+  @Test
+  fun testApiCompatibilityGatingRegression() {
+    // 1. If API version is 0 (missing symbol/unknown), compatibility must be false and safe fallback used
+    val compat0 = bridge.verifyNativeCompatibility(0)
+    assertFalse("API version 0 must not be considered compatible with v2 extensions", compat0)
+
+    // 2. If API version is 1 (legacy single-string), compatibility must be false
+    val compat1 = bridge.verifyNativeCompatibility(1)
+    assertFalse("API version 1 must not be considered compatible with v2 extensions", compat1)
+
+    // 3. If API version is 2 (explicit v2), compatibility must be true
+    val compat2 = bridge.verifyNativeCompatibility(2)
+    assertTrue("API version 2 must be considered compatible with v2 extensions", compat2)
+
+    // 4. In the absence of nativeGetApiVersion(), getApiVersion() must report actual numeric version (0 for unknown)
+    val actualApiVersion = bridge.getApiVersion()
+    if (!bridge.isNativeLoaded || actualApiVersion == 0) {
+      assertFalse("isNativeHiddenClassIdCompatible must be false when API version is UNKNOWN (0)", bridge.isNativeHiddenClassIdCompatible)
+    }
+
+    // 5. Verify fallback cosmetic resource extraction executes safely without crashing
+    val fallbackCosmetics = bridge.getHiddenClassIdSelectors(
+      classes = listOf("ad-banner", "tracker-box"),
+      ids = listOf("sponsor-link", "analytics-widget"),
+      exceptions = emptyList()
+    )
+    assertNotNull(fallbackCosmetics)
+    assertTrue(fallbackCosmetics.ok)
+  }
 }

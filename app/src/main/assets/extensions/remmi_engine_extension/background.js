@@ -28,13 +28,32 @@ function flushPendingMessages() {
   }
 }
 
-function withTimeout(promise, timeoutMs) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("native_timeout")), timeoutMs)
-    )
-  ]);
+function withTimeout(promise, timeoutMs, timeoutName = "native_timeout") {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(timeoutName);
+      err.name = "TimeoutError";
+      reject(err);
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
+}
+
+function isTraceCandidateUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  return (
+    url.includes("google-analytics") ||
+    url.includes("adblock-tester") ||
+    url.includes("googletagmanager") ||
+    url.includes("banner")
+  );
 }
 
 async function runPingBenchmark(count = 100) {
@@ -208,6 +227,35 @@ function connectNative() {
 
 connectNative();
 
+// Priority scheduling for low-priority dynamic cosmetic queries
+const MAX_CONCURRENT_CLASS_ID_COSMETICS = 2;
+let activeClassIdCosmetics = 0;
+const classIdCosmeticQueue = [];
+
+function scheduleClassIdCosmetic(task) {
+  return new Promise((resolve, reject) => {
+    const execute = () => {
+      activeClassIdCosmetics++;
+      task()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          activeClassIdCosmetics--;
+          if (classIdCosmeticQueue.length > 0) {
+            const next = classIdCosmeticQueue.shift();
+            next();
+          }
+        });
+    };
+
+    if (activeClassIdCosmetics < MAX_CONCURRENT_CLASS_ID_COSMETICS) {
+      execute();
+    } else {
+      classIdCosmeticQueue.push(execute);
+    }
+  });
+}
+
 // Cosmetic decision cache
 const COSMETIC_CACHE = new Map();
 const INFLIGHT_COSMETIC = new Map();
@@ -280,7 +328,6 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     const cached = getCachedCosmetic(cacheKey);
     if (cached) {
-      logToNative(`[WEBEXT_COSMETIC_CACHE_HIT] host=${hostname}`);
       if (sendResponse) sendResponse(cached);
       return true;
     }
@@ -295,7 +342,6 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const reqId = "cosmetic_" + Math.random().toString(36).substring(2, 9);
     const promise = (async () => {
       try {
-        logToNative(`[NM_SEND_START] requestId=${reqId} messageType=GET_COSMETIC_RESOURCES`);
         const startTs = Date.now();
         const resp = await withTimeout(
           browser.runtime.sendNativeMessage("remmi_engine_extension", {
@@ -307,20 +353,19 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             ids: message.ids || [],
             exceptions: message.exceptions || []
           }),
-          2000
+          2000,
+          "COSMETIC_RESOURCES_TIMEOUT"
         );
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
-          logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
           setCachedCosmetic(cacheKey, resp);
         } else {
           logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
-        let errCategory = e?.message === "native_timeout" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
+        let errCategory = e?.message === "COSMETIC_RESOURCES_TIMEOUT" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
         logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
-        logToNative(`[WEBEXT_COSMETIC_ERROR] error=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
         INFLIGHT_COSMETIC.delete(cacheKey);
@@ -359,9 +404,8 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     const reqId = "classid_" + Math.random().toString(36).substring(2, 9);
-    const promise = (async () => {
+    const promise = scheduleClassIdCosmetic(async () => {
       try {
-        logToNative(`[NM_SEND_START] requestId=${reqId} messageType=GET_HIDDEN_CLASS_ID_SELECTORS`);
         const startTs = Date.now();
         const resp = await withTimeout(
           browser.runtime.sendNativeMessage("remmi_engine_extension", {
@@ -371,25 +415,24 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             ids: ids,
             exceptions: message.exceptions || []
           }),
-          2000
+          2000,
+          "HIDDEN_CLASS_ID_TIMEOUT"
         );
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
-          logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
           setCachedCosmetic(cacheKey, resp);
         } else {
           logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
-        let errCategory = e?.message === "native_timeout" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
+        let errCategory = e?.message === "HIDDEN_CLASS_ID_TIMEOUT" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
         logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
-        logToNative(`[WEBEXT_COSMETIC_CLASS_ERROR] error=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
         INFLIGHT_COSMETIC.delete(cacheKey);
       }
-    })();
+    });
 
     INFLIGHT_COSMETIC.set(cacheKey, promise);
     promise.then((res) => {
@@ -528,22 +571,30 @@ function calculateIsThirdParty(targetUrl, sourceUrl) {
 }
 
 async function getNativeDecision(details, cacheKey, requestId) {
+  const reqId = requestId || ("req_" + Math.random().toString(36).substring(2, 9));
+  const isTrace = isTraceCandidateUrl(details.url);
+
   if (INFLIGHT_DECISIONS.has(cacheKey)) {
     BLOCKER_METRICS.inflightHits++;
-    logToNative(
-      `[WEBEXT_INFLIGHT_HIT] type=${details.type || "other"}`
-    );
+    if (isTrace) {
+      logToNative(`[WEBEXT_INFLIGHT_REUSE] requestId=${reqId} key=${cacheKey}`);
+    }
     return INFLIGHT_DECISIONS.get(cacheKey);
+  }
+
+  if (isTrace) {
+    logToNative(`[WEBEXT_INFLIGHT_OWNER] requestId=${reqId} key=${cacheKey}`);
   }
 
   const promise = (async () => {
     BLOCKER_METRICS.nativeCalls++;
     const sourceUrl = details.documentUrl || details.originUrl || "";
     const is3p = calculateIsThirdParty(details.url, sourceUrl);
-    const reqId = requestId || ("req_" + Math.random().toString(36).substring(2, 9));
     const startTs = Date.now();
 
-    logToNative(`[NM_SEND_START] requestId=${reqId} messageType=SHOULD_BLOCK`);
+    if (isTrace) {
+      logToNative(`[NM_SEND_START] requestId=${reqId} messageType=SHOULD_BLOCK url=${details.url} ts=${startTs}`);
+    }
 
     let response;
     try {
@@ -562,12 +613,13 @@ async function getNativeDecision(details, cacheKey, requestId) {
             thirdParty: is3p
           }
         ),
-        NATIVE_DECISION_TIMEOUT_MS
+        NATIVE_DECISION_TIMEOUT_MS,
+        "NATIVE_DECISION_TIMEOUT"
       );
     } catch (e) {
       let errName = "NATIVE_MESSAGE_FAILURE";
-      if (e?.message === "native_timeout") {
-        errName = "NATIVE_TIMEOUT";
+      if (e?.message === "NATIVE_DECISION_TIMEOUT" || e?.name === "TimeoutError") {
+        errName = "NATIVE_MESSAGE_QUEUE_TIMEOUT";
       }
       logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
       throw e;
@@ -582,7 +634,9 @@ async function getNativeDecision(details, cacheKey, requestId) {
       throw new Error(`native_decision_invalid:${errMsg}`);
     }
 
-    logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsedMs}`);
+    if (isTrace) {
+      logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsedMs}`);
+    }
 
     if (response.generation && response.generation > rulesGeneration) {
       rulesGeneration = response.generation;
@@ -655,12 +709,8 @@ browser.webRequest.onBeforeRequest.addListener(
       }
     }
 
-    logToNative(
-      `[WEBEXT_CACHE_MISS] type=${resType} method=${method}`
-    );
-
     const traceId = details.requestId || Math.random().toString(36).substring(7);
-    const isTraceCandidate = url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager");
+    const isTraceCandidate = isTraceCandidateUrl(url);
     if (isTraceCandidate) {
       logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
     }
@@ -707,8 +757,8 @@ browser.webRequest.onBeforeRequest.addListener(
       }
       
       let errorCategory = "NATIVE_MESSAGE_FAILURE";
-      if (e?.message === "native_timeout" || e?.name === "TimeoutError") {
-        errorCategory = "NATIVE_TIMEOUT";
+      if (e?.message === "NATIVE_DECISION_TIMEOUT" || e?.name === "TimeoutError") {
+        errorCategory = "NATIVE_MESSAGE_QUEUE_TIMEOUT";
       } else if (e?.message?.startsWith("native_decision_invalid")) {
         errorCategory = "INVALID_NATIVE_RESPONSE";
       } else if (e?.message?.startsWith("native_decision_failure")) {

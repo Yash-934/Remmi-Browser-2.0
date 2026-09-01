@@ -275,11 +275,13 @@ class AdblockBridge {
           nativeNumericApiVersion = nativeGetApiVersion()
           com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_OK]")
         } catch (_: Throwable) {
+          // If nativeGetApiVersion JNI symbol is not present in binary export table,
+          // capability MUST be reported as UNKNOWN (0), NEVER assumed to be API v2.
           nativeNumericApiVersion = 0
-          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_FAILED]")
+          com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_APIVERSION_UNKNOWN]")
         }
 
-        // Gate using explicit numeric API version: version >= 2 corresponds to 3-argument nativeGetHiddenClassIdSelectors
+        // Gate using explicit numeric API version: version >= 2 corresponds to proven 3-argument nativeGetHiddenClassIdSelectors
         isJniSignatureCompatible = (nativeNumericApiVersion >= 2)
         isNativeHiddenClassIdCompatible = isJniSignatureCompatible
 
@@ -893,9 +895,14 @@ class AdblockBridge {
     method: String = "GET",
     resourceType: String = "other",
     aggressive: Boolean = false,
-    thirdParty: Boolean = true
+    thirdParty: Boolean = true,
+    requestId: String = "n/a"
   ): BlockDecision {
     val startNs = System.nanoTime()
+    val isTraceCandidate = url.contains("google-analytics") || url.contains("adblock-tester") || url.contains("googletagmanager") || url.contains("banner")
+    if (isTraceCandidate && requestId != "n/a") {
+      Log.d(TAG, "[NATIVE_MATCH_START] requestId=$requestId url=${url.take(60)}")
+    }
     val currentGen = getEngineGeneration()
     try {
       if (isNativeLoaded) {
@@ -920,6 +927,11 @@ class AdblockBridge {
           }
           logSlowDecisionIfNeeded(startNs, resourceType)
           
+          val elapsedNs = System.nanoTime() - startNs
+          if (isTraceCandidate && requestId != "n/a") {
+            Log.d(TAG, "[NATIVE_MATCH_END] requestId=$requestId elapsedNanos=$elapsedNs blocked=$blocked")
+          }
+
           return BlockDecision(
             blocked = blocked,
             ruleId = "native",
@@ -1075,6 +1087,8 @@ class AdblockBridge {
       Log.w(TAG, "Slow adblock decision: ${elapsedUs}us type=$resourceType")
     }
   }
+
+  fun getApiVersion(): Int = nativeNumericApiVersion
 
   fun getLoadedRulesCount(): Int {
     if (isNativeLoaded) {
