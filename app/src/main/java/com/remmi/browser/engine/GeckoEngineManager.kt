@@ -86,13 +86,13 @@ class GeckoEngineManager private constructor(private val context: Context) {
   init {
     blockExtension.siteSecurityProvider = { host ->
       val policy = com.remmi.browser.security.SiteSecurityPolicyManager.getInstance(context).getPolicyForHost(host)
-      policy.cookiePolicy == "ALLOW"
+      policy.shieldsDown
     }
     blockExtension.cosmeticPolicyProvider = { host ->
       val globalSettings = com.remmi.browser.storage.SettingsRepository.getInstance(context).settings.value
       val globalCosmetic = globalSettings.cosmeticFilteringEnabled
       val policy = com.remmi.browser.security.SiteSecurityPolicyManager.getInstance(context).getPolicyForHost(host)
-      if (policy.cookiePolicy == "ALLOW") {
+      if (policy.shieldsDown) {
         false
       } else {
         when (policy.cosmeticPolicy) {

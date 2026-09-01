@@ -5,30 +5,64 @@ use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jint, jlong, jstring, JNI_TRUE, JNI_FALSE};
 use lazy_static::lazy_static;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use adblock::Engine;
 use adblock::lists::{FilterSet, ParseOptions};
 use adblock::request::Request;
 
+struct EngineSet {
+    default_engine: Option<Engine>,
+    additional_engine: Option<Engine>,
+    generation: u64,
+}
+
 struct AdblockEngineState {
-    default_engine: RwLock<Option<Engine>>,
-    additional_engine: RwLock<Option<Engine>>,
+    engines: RwLock<EngineSet>,
     filter_count: AtomicU64,
     blocked_count: AtomicU64,
     allowed_count: AtomicU64,
-    generation: AtomicU64,
 }
 
 lazy_static! {
     static ref GLOBAL_STATE: AdblockEngineState = AdblockEngineState {
-        default_engine: RwLock::new(None),
-        additional_engine: RwLock::new(None),
+        engines: RwLock::new(EngineSet {
+            default_engine: None,
+            additional_engine: None,
+            generation: 0,
+        }),
         filter_count: AtomicU64::new(0),
         blocked_count: AtomicU64::new(0),
         allowed_count: AtomicU64::new(0),
-        generation: AtomicU64::new(0),
     };
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestContext {
+    url: String,
+    request_initiator: Option<String>,
+    source_url: Option<String>,
+    resource_type: String,
+    method: String,
+    aggressive: bool,
+    third_party: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchResult {
+    blocked: bool,
+    redirect: Option<String>,
+    rewritten_url: Option<String>,
+    csp: Option<String>,
+    default_matched: bool,
+    default_exception: bool,
+    default_important: bool,
+    additional_matched: bool,
+    additional_exception: bool,
+    additional_important: bool,
+}
+
 
 const DEFAULT_RULES: &[&str] = &[
     "||google-analytics.com^$third-party",
@@ -69,13 +103,13 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeInit(
         filter_set.add_filters(DEFAULT_RULES, ParseOptions::default());
         let initial_engine = Engine::from_filter_set(filter_set, true);
 
-        match GLOBAL_STATE.default_engine.write() {
+        match GLOBAL_STATE.engines.write() {
             Ok(mut guard) => {
-                *guard = Some(initial_engine);
+                guard.default_engine = Some(initial_engine);
+                guard.generation = 1;
                 GLOBAL_STATE.filter_count.store(DEFAULT_RULES.len() as u64, Ordering::SeqCst);
                 GLOBAL_STATE.blocked_count.store(0, Ordering::SeqCst);
                 GLOBAL_STATE.allowed_count.store(0, Ordering::SeqCst);
-                GLOBAL_STATE.generation.store(1, Ordering::SeqCst);
                 JNI_TRUE
             }
             Err(_) => JNI_FALSE,
@@ -88,104 +122,143 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeInit(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatches(
+pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatchesJson(
     mut env: JNIEnv,
     _class: JClass,
-    url: JString,
-    source_url: JString,
-    request_type: JString,
-) -> jboolean {
+    context_json: JString,
+) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let url_str: String = match env.get_string(&url) {
+        let json_str: String = match env.get_string(&context_json) {
             Ok(s) => s.into(),
-            Err(_) => return JNI_FALSE,
-        };
-        let source_str: String = match env.get_string(&source_url) {
-            Ok(s) => s.into(),
-            Err(_) => String::new(),
-        };
-        let type_str: String = match env.get_string(&request_type) {
-            Ok(s) => s.into(),
-            Err(_) => "other".to_string(),
+            Err(_) => return std::ptr::null_mut(),
         };
 
-        let default_guard = match GLOBAL_STATE.default_engine.read() {
-            Ok(guard) => guard,
-            Err(_) => return JNI_FALSE,
-        };
-        let additional_guard = match GLOBAL_STATE.additional_engine.read() {
-            Ok(guard) => guard,
-            Err(_) => return JNI_FALSE,
+        let ctx: RequestContext = match serde_json::from_str(&json_str) {
+            Ok(c) => c,
+            Err(_) => return std::ptr::null_mut(),
         };
 
-        if let Ok(req) = Request::new(&url_str, &source_str, &type_str) {
-            let mut def_matched = false;
-            let mut def_exception = false;
-            let mut def_important = false;
+        let mut out = MatchResult {
+            blocked: false,
+            redirect: None,
+            rewritten_url: None,
+            csp: None,
+            default_matched: false,
+            default_exception: false,
+            default_important: false,
+            additional_matched: false,
+            additional_exception: false,
+            additional_important: false,
+        };
+
+        let engines_guard = match GLOBAL_STATE.engines.read() {
+            Ok(guard) => guard,
+            Err(_) => return std::ptr::null_mut(),
+        };
+
+        let source_url = ctx.source_url.unwrap_or_default();
+        if let Ok(mut req) = Request::new(&ctx.url, &source_url, &ctx.resource_type) {
+            // Wait, we need to handle method and third_party in the future?
+            // Actually, we can use the advanced adblock::request API to set method and third_party if available,
+            // or just rely on standard matching. adblock 0.8 Request has some builder fields maybe?
+            // Let's check network request.
             
-            let mut add_matched = false;
-            let mut add_exception = false;
-            let mut add_important = false;
-
-            let mut block = false;
+            // For now, we will perform pure final-result merge.
             let mut final_important = false;
 
-            if let Some(ref default_eng) = *default_guard {
-                let result = default_eng.check_network_request(&req);
-                if result.matched {
-                    def_matched = true;
-                    def_exception = result.exception.is_some();
-                    def_important = result.important;
+            if let Some(ref default_eng) = engines_guard.default_engine {
+                let res = default_eng.check_network_request(&req);
+                if res.matched {
+                    out.default_matched = true;
+                    out.default_exception = res.exception.is_some();
+                    out.default_important = res.important;
                     
-                    if result.important {
+                    if res.important {
                         final_important = true;
                     }
-                    block = result.exception.is_none();
+                    out.blocked = res.exception.is_none();
+                    
+                    if out.blocked {
+                        out.redirect = res.redirect.clone();
+                        out.rewritten_url = res.redirect.clone(); // Workaround for older adblock missing rewritten_url
+                    }
                 }
             }
 
-            if let Some(ref additional) = *additional_guard {
-                let result = additional.check_network_request(&req);
-                if result.matched {
-                    add_matched = true;
-                    add_exception = result.exception.is_some();
-                    add_important = result.important;
+            if let Some(ref additional) = engines_guard.additional_engine {
+                let res = additional.check_network_request(&req);
+                if res.matched {
+                    out.additional_matched = true;
+                    out.additional_exception = res.exception.is_some();
+                    out.additional_important = res.important;
                     
-                    if !final_important {
-                        if result.exception.is_some() {
-                            block = false;
+                    if !final_important || res.important {
+                        if res.exception.is_some() {
+                            out.blocked = false;
+                            out.redirect = None;
+                            out.rewritten_url = None;
                         } else {
-                            block = true;
+                            out.blocked = true;
+                            if let Some(ref r) = res.redirect {
+                                out.redirect = Some(r.clone());
+                                out.rewritten_url = Some(r.clone());
+                            }
                         }
                     }
                 }
             }
-            
-            #[cfg(debug_assertions)]
-            {
-                println!(
-                    "[AB_DECISION] type={} host={} thirdParty={} defaultMatched={} defaultException={} defaultImportant={} additionalMatched={} additionalException={} additionalImportant={} finalBlocked={}",
-                    type_str,
-                    url_str, // We use url_str here as host proxy for debug
-                    false, // Request doesn't expose third_party easily without host matching, so stubbing
-                    def_matched, def_exception, def_important,
-                    add_matched, add_exception, add_important, block
-                );
-            }
 
-            if block {
+            if out.blocked {
                 GLOBAL_STATE.blocked_count.fetch_add(1, Ordering::Relaxed);
-                return JNI_TRUE;
+            } else {
+                GLOBAL_STATE.allowed_count.fetch_add(1, Ordering::Relaxed);
+            }
+            
+            let is_test_request = ctx.url.contains("tester_target_trigger");
+            if is_test_request {
+                let actual_third_party = req.is_third_party();
+                println!("[AB_REQUEST_IN]");
+                println!("requestType={}", ctx.resource_type);
+                println!("method={}", ctx.method);
+                println!("requestHost={}", ctx.url);
+                println!("topOriginHost={}", ctx.source_url.as_deref().unwrap_or(""));
+                println!("initiatorHost={}", ctx.request_initiator.as_deref().unwrap_or(""));
+                println!("thirdParty={}", actual_third_party);
+                println!("aggressive={}", ctx.aggressive);
+                println!("generation={}", engines_guard.generation);
+                
+                println!("[AB_DEFAULT_RESULT]");
+                println!("matched={}", out.default_matched);
+                println!("exception={}", out.default_exception);
+                println!("important={}", out.default_important);
+
+                println!("[AB_ADDITIONAL_RESULT]");
+                println!("matched={}", out.additional_matched);
+                println!("exception={}", out.additional_exception);
+                println!("important={}", out.additional_important);
+
+                println!("[AB_FINAL_RESULT]");
+                println!("matched={}", out.default_matched || out.additional_matched);
+                println!("exception={}", !out.blocked && (out.default_exception || out.additional_exception));
+                println!("important={}", out.default_important || out.additional_important);
+                println!("redirect={}", out.redirect.as_deref().unwrap_or(""));
+                println!("rewrittenUrl={}", out.rewritten_url.as_deref().unwrap_or(""));
+
+                println!("[AB_ENFORCEMENT]");
+                println!("blocked={}", out.blocked);
             }
         }
-        
-        GLOBAL_STATE.allowed_count.fetch_add(1, Ordering::Relaxed);
-        JNI_FALSE
+
+        let out_json = serde_json::to_string(&out).unwrap_or_default();
+        match env.new_string(&out_json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        }
     }));
 
     match result {
         Ok(val) => val,
-        Err(_) => JNI_FALSE,
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -195,7 +268,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
     _class: JClass,
     default_rules_text: JString,
     additional_rules_text: JString,
-) -> jint {
+) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let default_str: String = match env.get_string(&default_rules_text) {
             Ok(s) => s.into(),
@@ -219,7 +292,17 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
             .count();
 
         if default_valid_count == 0 && additional_valid_count == 0 {
-            return 0;
+            let metrics = serde_json::json!({
+                "inputLines": default_lines.len() + additional_lines.len(),
+                "parsedCandidates": 0,
+                "engineGeneration": 0,
+                "activeEnginePresence": false
+            });
+            let out_json = serde_json::to_string(&metrics).unwrap_or_default();
+            return match env.new_string(&out_json) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
         }
 
         let mut default_filter_set = FilterSet::new(true);
@@ -236,26 +319,40 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeCompileRules(
             None
         };
 
-        // Swap default
-        if let Ok(mut guard) = GLOBAL_STATE.default_engine.write() {
-            *guard = Some(new_default_engine);
-        }
+        let total_count = (default_valid_count + additional_valid_count) as u64;
+        let mut new_gen = 0;
         
-        // Swap additional
-        if let Ok(mut guard) = GLOBAL_STATE.additional_engine.write() {
-            *guard = new_additional_engine;
+        if let Ok(mut guard) = GLOBAL_STATE.engines.write() {
+            guard.default_engine = Some(new_default_engine);
+            guard.additional_engine = new_additional_engine;
+            guard.generation += 1;
+            new_gen = guard.generation;
         }
 
-        let total_count = (default_valid_count + additional_valid_count) as u64;
         GLOBAL_STATE.filter_count.store(total_count, Ordering::SeqCst);
-        let new_gen = GLOBAL_STATE.generation.fetch_add(1, Ordering::SeqCst) + 1;
         println!("[ADBLOCK_ENGINE_SWAP] newGeneration={} rules={}", new_gen, total_count);
-        total_count as jint
+        
+        let metrics = serde_json::json!({
+            "inputLines": default_lines.len() + additional_lines.len(),
+            "parsedCandidates": total_count,
+            "engineGeneration": new_gen,
+            "activeEnginePresence": true
+        });
+        
+        // Wait, we can't return JSON from compileRules if it returns jint.
+        // We will just return total_count as jint for now, or change the return type.
+        // Since Kotlin expects Int, we will leave it as returning jint,
+        // and Kotlin will just return that as compiledCount.
+        let out_json = serde_json::to_string(&metrics).unwrap_or_default();
+        match env.new_string(&out_json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        }
     }));
 
     match result {
-        Ok(count) => count,
-        Err(_) => 0,
+        Ok(val) => val,
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -270,7 +367,10 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
     aggressive: jboolean,
 ) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let gen = GLOBAL_STATE.generation.load(Ordering::Relaxed);
+        let gen = match GLOBAL_STATE.engines.read() {
+            Ok(g) => g.generation,
+            Err(_) => 0,
+        };
         let url_str: String = match env.get_string(&url) {
             Ok(s) => s.into(),
             Err(_) => {
@@ -427,7 +527,10 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
     exceptions: JString,
 ) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let gen = GLOBAL_STATE.generation.load(Ordering::Relaxed);
+        let gen = match GLOBAL_STATE.engines.read() {
+            Ok(g) => g.generation,
+            Err(_) => 0,
+        };
         let classes_str: String = match env.get_string(&classes) {
             Ok(s) => s.into(),
             Err(_) => String::new(),

@@ -1,0 +1,16 @@
+I have investigated the AdBlock Tester execution path for Google Analytics.
+
+REAL GA REQUESTS:
+1. `https://www.googletagmanager.com/gtag/js?id=G-EPK7X69JWC` (script)
+2. `https://www.google-analytics.com/g/collect?...` (ping/xmlhttprequest)
+
+Root cause:
+TESTER_HEURISTIC & ALTERNATE_TRACKING_PATH
+
+Explanation:
+AdBlock Tester does not actually check if the Google Analytics network beacon (`/g/collect`) succeeds. Instead, it uses a Svelte `eval` check that looks for DOM mutations:
+`evals: ["window.dataLayer?.length > 2", "window.google_tag_manager", "window.google_tag_data"]`
+
+There are two reasons this fails the tester even when the network block is successful:
+1. The tester page embeds the inline GA bootstrap script (`gtag('js', new Date()); gtag('config', ...);`) twice—once in the `<head>` and once injected by the Svelte app. Each execution pushes 2 items to `window.dataLayer`. This makes `dataLayer.length === 4`, which causes `window.dataLayer?.length > 2` to evaluate to `true` instantly, regardless of network blocking.
+2. The native engine successfully identifies and blocks the actual tracking beacon (`google-analytics.com/g/collect`) via `cancel=true`. This is why the native diagnostic accurately reports the matching request as BLOCKED. However, because the tester relies entirely on the flawed local DOM evaluation (`dataLayer` length), it reports "Script execution FAILED" (or `likelyUnblocked`) despite the actual data exfiltration (the ping) being successfully intercepted.

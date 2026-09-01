@@ -345,7 +345,12 @@ const BLOCKABLE_TYPES = new Set([
   "xmlhttprequest",
   "web_manifest",
   "object",
-  "media"
+  "media",
+  "beacon",
+  "ping",
+  "csp_report",
+  "websocket",
+  "other"
 ]);
 
 const BLOCKER_METRICS = {
@@ -365,7 +370,12 @@ function getCacheTtl(resourceType) {
       return 5 * 60 * 1000;
     case "image":
     case "imageset":
-    case "media":
+    case "media",
+  "beacon",
+  "ping",
+  "csp_report",
+  "websocket",
+  "other":
       return 2 * 60 * 1000;
     case "main_frame":
     case "sub_frame":
@@ -427,14 +437,23 @@ async function getNativeDecision(details, cacheKey) {
 
   const promise = (async () => {
     BLOCKER_METRICS.nativeCalls++;
+    // We pass the raw URLs to the native Rust engine, which uses a 
+    // complete Public Suffix List (PSL) to correctly identify eTLD+1 
+    // matching and third-party status.
+    const sourceUrl = details.documentUrl || details.originUrl || "";
+    
     const response = await withTimeout(
       browser.runtime.sendNativeMessage(
         "remmi_engine_extension",
         {
           type: "SHOULD_BLOCK",
           url: details.url,
-          sourceUrl: details.originUrl || details.documentUrl || "",
-          resourceType: details.type || "other"
+          sourceUrl: sourceUrl,
+          initiator: details.originUrl || "",
+          method: details.method || "GET",
+          resourceType: details.type || "other",
+          aggressive: currentProfile === "GHOST" || currentProfile === "TOR",
+          thirdParty: true // Placeholder, Rust engine does the real eTLD+1 calculation
         }
       ),
       NATIVE_DECISION_TIMEOUT_MS
@@ -499,15 +518,13 @@ browser.webRequest.onBeforeRequest.addListener(
       const cached = getCachedDecision(cacheKey);
       if (cached !== null) {
         BLOCKER_METRICS.cacheHits++;
-        logToNative(
-          `[WEBEXT_CACHE_HIT] type=${resType} cancel=${cached}`
-        );
+        if (cached === true) BLOCKER_METRICS.blocked++;
         if ((BLOCKER_METRICS.requests) % 50 === 0) {
           logToNative(
             `[WEBEXT_METRICS] requests=${BLOCKER_METRICS.requests} cacheHits=${BLOCKER_METRICS.cacheHits} inflightHits=${BLOCKER_METRICS.inflightHits} nativeCalls=${BLOCKER_METRICS.nativeCalls} errors=${BLOCKER_METRICS.nativeErrors} blocked=${BLOCKER_METRICS.blocked}`
           );
         }
-        return { cancel: cached };
+        return { cancel: cached === true };
       }
     }
 
@@ -516,34 +533,42 @@ browser.webRequest.onBeforeRequest.addListener(
     );
 
     try {
-      const shouldCancel = await getNativeDecision(details, cacheKey);
+      
+    // --- TRACE ---
+    if (url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager")) {
+      const traceId = details.requestId || Math.random().toString(36).substring(7);
+      logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
+      
+      const traceResponse = await getNativeDecision(details, cacheKey);
+      logToNative(`[AB_ENFORCEMENT_RESULT] requestId=${traceId} cancel=${traceResponse.cancel}`);
+      
+      // We will trace completed/error in another listener
+    }
+    // --- END TRACE ---
 
-      if (isIdempotent) {
+    const response = await getNativeDecision(details, cacheKey);
+      const shouldCancel = response.cancel === true;
+      if (isIdempotent && !response.redirect && !response.rewrittenUrl && !response.csp) {
         setCachedDecision(cacheKey, shouldCancel, resType);
       }
-
+      
+      let finalResult = { cancel: shouldCancel };
+      
       if (shouldCancel) {
         BLOCKER_METRICS.blocked++;
-        logToNative(`[WEBEXT_BLOCK] type=${resType}`);
-
-        if (port) {
-          try {
-            port.postMessage({
-              type: "BLOCKED",
-              action: "blocked",
-              url: url,
-              category: resType
-            });
-          } catch (_e) {}
-        }
-
-        if ((BLOCKER_METRICS.requests) % 50 === 0) {
-          logToNative(
-            `[WEBEXT_METRICS] requests=${BLOCKER_METRICS.requests} cacheHits=${BLOCKER_METRICS.cacheHits} inflightHits=${BLOCKER_METRICS.inflightHits} nativeCalls=${BLOCKER_METRICS.nativeCalls} errors=${BLOCKER_METRICS.nativeErrors} blocked=${BLOCKER_METRICS.blocked}`
-          );
-        }
-
-        return { cancel: true };
+        // NOTE: We no longer post "BLOCKED" URL messages from the hot path
+        // to avoid I/O bottlenecks.
+      } else if (response.redirect) {
+        finalResult = { redirectUrl: response.redirect };
+      } else if (response.rewrittenUrl) {
+        finalResult = { redirectUrl: response.rewrittenUrl };
+      }
+      
+      if (response.csp) {
+        // CSP injection requires onHeadersReceived modifying response headers.
+        // Returning it in onBeforeRequest does nothing in standard WebExtensions.
+        // Marking it PARTIAL.
+        logToNative(`[WEBEXT_PARTIAL] unsupported action: csp`);
       }
 
       if ((BLOCKER_METRICS.requests) % 50 === 0) {
@@ -551,8 +576,7 @@ browser.webRequest.onBeforeRequest.addListener(
           `[WEBEXT_METRICS] requests=${BLOCKER_METRICS.requests} cacheHits=${BLOCKER_METRICS.cacheHits} inflightHits=${BLOCKER_METRICS.inflightHits} nativeCalls=${BLOCKER_METRICS.nativeCalls} errors=${BLOCKER_METRICS.nativeErrors} blocked=${BLOCKER_METRICS.blocked}`
         );
       }
-
-      return { cancel: false };
+      return finalResult;
     } catch (e) {
       BLOCKER_METRICS.nativeErrors++;
       if ((BLOCKER_METRICS.requests) % 50 === 0) {
@@ -575,4 +599,22 @@ browser.webRequest.onBeforeRequest.addListener(
   },
   { urls: ["<all_urls>"] },
   ["blocking"]
+);
+
+browser.webRequest.onCompleted.addListener(
+  (details) => {
+    if (details.url.includes("google-analytics") || details.url.includes("adblock-tester") || details.url.includes("googletagmanager")) {
+      logToNative(`[AB_REQUEST_COMPLETION] requestId=${details.requestId} url=${details.url} completed=true status=${details.statusCode}`);
+    }
+  },
+  { urls: ["<all_urls>"] }
+);
+
+browser.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    if (details.url.includes("google-analytics") || details.url.includes("adblock-tester") || details.url.includes("googletagmanager")) {
+      logToNative(`[AB_REQUEST_COMPLETION] requestId=${details.requestId} url=${details.url} completed=false error=${details.error}`);
+    }
+  },
+  { urls: ["<all_urls>"] }
 );

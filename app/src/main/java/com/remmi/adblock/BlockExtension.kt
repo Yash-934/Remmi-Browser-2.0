@@ -333,6 +333,10 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
 
     val url = messageJson.optString("url")
     val sourceUrl = messageJson.optString("sourceUrl")
+    val initiator = messageJson.optString("initiator")
+    val method = messageJson.optString("method", "GET")
+    val aggressive = messageJson.optBoolean("aggressive", false)
+    val thirdParty = messageJson.optBoolean("thirdParty", true)
     val resourceType = messageJson.optString("resourceType", "other")
 
     if (url.isBlank()) {
@@ -366,7 +370,11 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           adblockBridge.evaluateDecision(
             url = url,
             sourceUrl = sourceUrl,
-            resourceType = resourceType
+            initiator = initiator,
+            method = method,
+            resourceType = resourceType,
+            aggressive = aggressive,
+            thirdParty = thirdParty
           )
         }
 

@@ -13,6 +13,7 @@ data class SiteSecuritySettings(
   val blockPopups: Boolean = true,
   val autoplayAllowed: Boolean = false,
   val cookiePolicy: String = "ISOLATE", // ISOLATE, BLOCK, ALLOW
+  val shieldsDown: Boolean = false,
   val cosmeticPolicy: String = "DEFAULT", // DEFAULT, ENABLED, DISABLED
   val customSecurityLevel: SecurityLevel? = null
 )
@@ -44,6 +45,7 @@ class SiteSecurityPolicyManager private constructor(private val context: Context
           val popups = json.optBoolean("popups", true)
           val autoplay = json.optBoolean("autoplay", false)
           val cookie = json.optString("cookie", "ISOLATE")
+          val shieldsDown = json.optBoolean("shieldsDown", false)
           val cosmetic = json.optString("cosmetic", "DEFAULT")
           val secLevelStr = json.optString("secLevel", "")
           val secLevel = if (secLevelStr.isNotEmpty()) SecurityLevel.valueOf(secLevelStr) else null
@@ -53,6 +55,7 @@ class SiteSecurityPolicyManager private constructor(private val context: Context
             blockPopups = popups,
             autoplayAllowed = autoplay,
             cookiePolicy = cookie,
+            shieldsDown = shieldsDown,
             cosmeticPolicy = cosmetic,
             customSecurityLevel = secLevel
           )
@@ -74,6 +77,7 @@ class SiteSecurityPolicyManager private constructor(private val context: Context
       put("popups", settings.blockPopups)
       put("autoplay", settings.autoplayAllowed)
       put("cookie", settings.cookiePolicy)
+      put("shieldsDown", settings.shieldsDown)
       put("cosmetic", settings.cosmeticPolicy)
       settings.customSecurityLevel?.let { put("secLevel", it.name) }
     }

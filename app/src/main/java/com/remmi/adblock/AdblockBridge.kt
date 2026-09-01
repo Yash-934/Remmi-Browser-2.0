@@ -20,7 +20,44 @@ data class BlockDecision(
   val blocked: Boolean,
   val ruleId: String? = null,
   val ruleSource: String? = null,
-  val engineGeneration: Long = 0L
+  val engineGeneration: Long = 0L,
+  val redirectUrl: String? = null,
+  val rewrittenUrl: String? = null,
+  val csp: String? = null,
+  
+  // Expose diagnostic match fields
+  val defaultMatched: Boolean = false,
+  val defaultException: Boolean = false,
+  val defaultImportant: Boolean = false,
+  val additionalMatched: Boolean = false,
+  val additionalException: Boolean = false,
+  val additionalImportant: Boolean = false,
+)
+
+data class NetworkRequestContext(
+  val url: String,
+  val requestInitiator: String,
+  val resourceType: String,
+  val method: String,
+  val aggressive: Boolean,
+  val thirdParty: Boolean,
+  
+  val previouslyMatchedRule: Boolean = false,
+  val previouslyMatchedException: Boolean = false,
+  val previouslyMatchedImportant: Boolean = false
+)
+
+data class NativeMatchResult(
+  val blocked: Boolean,
+  val redirect: String?,
+  val rewrittenUrl: String?,
+  val csp: String?,
+  val defaultMatched: Boolean,
+  val defaultException: Boolean,
+  val defaultImportant: Boolean,
+  val additionalMatched: Boolean,
+  val additionalException: Boolean,
+  val additionalImportant: Boolean
 )
 
 data class CosmeticResources(
@@ -319,7 +356,8 @@ class AdblockBridge {
         defaultPatterns.joinToString("\n")
       try {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_START]")
-        nativeCompileRules(rulesText, "")
+        val json = nativeCompileRules(rulesText, "")
+        Log.d(TAG, "[ADBLOCK_METRICS] init_metrics: $json")
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_OK]")
       } catch (e: Throwable) {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_DEFAULT_RULES_FAILED]")
@@ -390,7 +428,10 @@ class AdblockBridge {
     if (isNativeLoaded) {
       try {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
-        compiledCount = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+        val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+        val metricsObj = org.json.JSONObject(metricsJson)
+        compiledCount = metricsObj.optInt("parsedCandidates", 0)
+        Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
       } catch (e: Throwable) {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
@@ -651,25 +692,57 @@ class AdblockBridge {
   }
 
   fun shouldBlock(url: String, sourceUrl: String = "", resourceType: String = "other"): Boolean {
-    return evaluateDecision(url, sourceUrl, resourceType).blocked
+    return evaluateDecision(url, sourceUrl, resourceType = resourceType).blocked
   }
 
-  fun evaluateDecision(url: String, sourceUrl: String = "", resourceType: String = "other"): BlockDecision {
+  fun evaluateDecision(
+    url: String, 
+    sourceUrl: String = "", 
+    initiator: String = "",
+    method: String = "GET",
+    resourceType: String = "other",
+    aggressive: Boolean = false,
+    thirdParty: Boolean = true
+  ): BlockDecision {
     val startNs = System.nanoTime()
     val currentGen = getEngineGeneration()
     try {
       if (isNativeLoaded) {
         try {
-          val blocked = nativeMatches(url, sourceUrl, resourceType)
+          // Serialize request context
+          val context = org.json.JSONObject().apply {
+            put("url", url)
+            put("requestInitiator", initiator)
+            put("sourceUrl", sourceUrl)
+            put("resourceType", resourceType)
+            put("method", method)
+            put("aggressive", aggressive)
+            put("thirdParty", thirdParty)
+          }.toString()
+
+          val resultJson = nativeMatchesJson(context)
+          val resultObj = org.json.JSONObject(resultJson)
+          val blocked = resultObj.optBoolean("blocked", false)
+          
           if (blocked) {
             totalBlockedCount.incrementAndGet()
           }
           logSlowDecisionIfNeeded(startNs, resourceType)
+          
           return BlockDecision(
             blocked = blocked,
             ruleId = "native",
             ruleSource = "RustEngine",
-            engineGeneration = currentGen
+            engineGeneration = currentGen,
+            redirectUrl = resultObj.optString("redirect", null).takeIf { it.isNotEmpty() },
+            rewrittenUrl = resultObj.optString("rewrittenUrl", null).takeIf { it.isNotEmpty() },
+            csp = resultObj.optString("csp", null).takeIf { it.isNotEmpty() },
+            defaultMatched = resultObj.optBoolean("defaultMatched", false),
+            defaultException = resultObj.optBoolean("defaultException", false),
+            defaultImportant = resultObj.optBoolean("defaultImportant", false),
+            additionalMatched = resultObj.optBoolean("additionalMatched", false),
+            additionalException = resultObj.optBoolean("additionalException", false),
+            additionalImportant = resultObj.optBoolean("additionalImportant", false)
           )
         } catch (t: Throwable) {
           state = AdblockState.DEGRADED
@@ -767,8 +840,8 @@ class AdblockBridge {
 
   // Native JNI functions implemented in rust/src/lib.rs
   private external fun nativeInit(): Boolean
-  private external fun nativeMatches(url: String, sourceUrl: String, requestType: String): Boolean
-  private external fun nativeCompileRules(defaultRules: String, additionalRules: String): Int
+  private external fun nativeMatchesJson(contextJson: String): String
+  private external fun nativeCompileRules(defaultRules: String, additionalRules: String): String
   private external fun nativeGetCosmeticResources(url: String, classes: String, ids: String, exceptions: String, aggressive: Boolean): String
   private external fun nativeGetHiddenClassIdSelectors(classes: String, ids: String, exceptions: String): String
   private external fun nativeGetFilterCount(): Int
