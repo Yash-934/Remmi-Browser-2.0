@@ -106,8 +106,49 @@ object CrashHandlerHelper {
       // If previous run was NOT clean AND there was a session recorded AND no Java crash report was written,
       // this indicates an abnormal process termination (native crash / OOM / force kill / external termination).
       if (!wasClean && prevSessionId != null && !hasPendingJavaCrash) {
+        
+        var nativeSignal = "UNKNOWN"
+        var tombstoneText = "UNAVAILABLE"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+          try {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val exitReasons = am.getHistoricalProcessExitReasons(context.packageName, 0, 1)
+            if (exitReasons.isNotEmpty()) {
+              val reason = exitReasons[0]
+              val reasonStr = when (reason.reason) {
+                android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH"
+                android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "NATIVE_CRASH (SIGSEGV/SIGABRT/SIGBUS/SIGILL)"
+                android.app.ApplicationExitInfo.REASON_ANR -> "ANR"
+                android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "OOM (LOW_MEMORY)"
+                android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+                android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+                else -> "UNKNOWN (${reason.reason})"
+              }
+              nativeSignal = "$reasonStr - ${reason.description ?: "No description"}"
+              try {
+                val trace = reason.traceInputStream
+                if (trace != null) {
+                  tombstoneText = trace.bufferedReader().use { it.readText() }
+                }
+              } catch (e: Exception) {
+                Log.w(TAG, "Could not read tombstone trace: ${e.message}")
+              }
+            }
+          } catch (e: Exception) {
+            Log.w(TAG, "Failed to get ApplicationExitInfo: ${e.message}")
+          }
+        }
+        
+        val reportContext = object : android.content.ContextWrapper(context) {
+          override fun getSystemService(name: String): Any? {
+            if (name == "abnormal_signal") return nativeSignal
+            if (name == "tombstone_text") return tombstoneText
+            return super.getSystemService(name)
+          }
+        }
+        
         val abnormalReport = buildDiagnosticReport(
-          context = context,
+          context = reportContext,
           reportType = ReportType.ABNORMAL_TERMINATION,
           thread = null,
           throwable = null,
@@ -547,6 +588,9 @@ object CrashHandlerHelper {
       ""
     }
 
+    val nativeSignal = try { context.getSystemService("abnormal_signal") as? String ?: "UNKNOWN" } catch(_: Throwable) { "UNKNOWN" }
+    val tombstoneText = try { context.getSystemService("tombstone_text") as? String ?: "UNAVAILABLE" } catch(_: Throwable) { "UNAVAILABLE" }
+
     return """
 ======================================================================
 REMMI BROWSER - AUTOMATIC DIAGNOSTIC REPORT
@@ -614,9 +658,13 @@ $stackTrace
 NATIVE CRASH:
 ${if (throwable == null) """
 NATIVE_PROCESS_TERMINATION_SUSPECTED
+Signal/Reason: $nativeSignal
 Last native operation: $displayLastNativeOp
 NO JAVA EXCEPTION CAPTURED.
 Process ended before the Java crash handler could execute or the process was terminated externally.
+
+TOMBSTONE/BACKTRACE:
+$tombstoneText
 """.trimIndent() else "N/A (Captured by Java UncaughtExceptionHandler)"}
 
 END REPORT

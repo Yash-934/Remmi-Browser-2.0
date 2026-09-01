@@ -38,6 +38,8 @@ object DebugLogManager {
     loadPersistedBreadcrumbs()
   }
 
+  private var flushJob: kotlinx.coroutines.Job? = null
+
   fun log(message: String) {
     val timestamp = synchronized(timeFormat) { timeFormat.format(Date()) }
     val sanitized = sanitize(message)
@@ -61,16 +63,17 @@ object DebugLogManager {
       persistentBreadcrumbs.pollFirst()
     }
 
-    // 3. Flush rule: Synchronous flush for critical/fatal/lifecycle events, async otherwise
-    if (sanitized.contains("[APP_LIFECYCLE]") ||
-        sanitized.contains("CRITICAL") ||
-        sanitized.contains("FATAL") ||
-        sanitized.contains("ERROR")
-    ) {
+    // 3. Flush rule: Synchronous flush ONLY for critical/fatal, async debounced otherwise
+    if (sanitized.contains("FATAL") || sanitized.contains("CRITICAL")) {
       flushSynchronously()
     } else {
-      ioScope.launch {
-        flushInternal()
+      synchronized(this) {
+        if (flushJob == null || flushJob?.isCompleted == true) {
+          flushJob = ioScope.launch {
+            kotlinx.coroutines.delay(1000)
+            flushInternal()
+          }
+        }
       }
     }
   }

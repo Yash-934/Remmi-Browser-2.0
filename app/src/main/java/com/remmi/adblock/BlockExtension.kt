@@ -104,6 +104,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
   }
 
   private val extensionScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+  private val decisionDispatcher = Dispatchers.Default.limitedParallelism(Runtime.getRuntime().availableProcessors().coerceAtMost(4))
 
   private fun parseMessage(message: Any): JSONObject? {
     return try {
@@ -495,55 +496,62 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 Log.d(TAG, "[NM_NATIVE_HANDLER_START] requestId=$requestId")
               }
 
-              val sourceHost = try {
-                if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
-              } catch (_: Exception) { null }
-              val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+              extensionScope.launch(decisionDispatcher) {
+                val sourceHost = try {
+                  if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
+                } catch (_: Exception) { null }
+                val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
 
-              val decision = if (bypass) {
-                BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
-              } else {
-                adblockBridge.evaluateDecision(
-                  url = url,
-                  sourceUrl = sourceUrl,
-                  initiator = initiator,
-                  method = method,
-                  resourceType = resourceType,
-                  aggressive = aggressive,
-                  thirdParty = thirdParty,
-                  requestId = requestId
-                )
-              }
-              val endTs = System.currentTimeMillis()
+                val decision = if (bypass) {
+                  BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
+                } else {
+                  adblockBridge.evaluateDecision(
+                    url = url,
+                    sourceUrl = sourceUrl,
+                    initiator = initiator,
+                    method = method,
+                    resourceType = resourceType,
+                    aggressive = aggressive,
+                    thirdParty = thirdParty,
+                    requestId = requestId
+                  )
+                }
+                val endTs = System.currentTimeMillis()
 
-              val resp = JSONObject().apply {
-                put("type", "SHOULD_BLOCK_RESULT")
-                put("ok", true)
-                put("cancel", decision.blocked)
-                if (decision.ruleId != null) put("ruleId", decision.ruleId)
-                if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
-                put("generation", decision.engineGeneration)
-                put("requestId", requestId)
-                put("portGeneration", reqPortGen)
-                put("jsInstanceId", jsInstanceId)
-                put("instanceId", instId)
-                put("nativeStartTimestamp", startTs)
-                put("nativeEndTimestamp", endTs)
-                put("responseDeliveryTimestamp", System.currentTimeMillis())
-              }
+                val resp = JSONObject().apply {
+                  put("type", "SHOULD_BLOCK_RESULT")
+                  put("ok", true)
+                  put("cancel", decision.blocked)
+                  if (decision.ruleId != null) put("ruleId", decision.ruleId)
+                  if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
+                  put("generation", decision.engineGeneration)
+                  put("requestId", requestId)
+                  put("portGeneration", reqPortGen)
+                  put("jsInstanceId", jsInstanceId)
+                  put("instanceId", instId)
+                  put("nativeStartTimestamp", startTs)
+                  put("nativeEndTimestamp", endTs)
+                  put("responseDeliveryTimestamp", System.currentTimeMillis())
+                }
 
-              if (isTrace) {
-                Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$requestId cancel=${decision.blocked} elapsed=${endTs - startTs}ms")
-              }
+                if (isTrace) {
+                  Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$requestId cancel=${decision.blocked} elapsed=${endTs - startTs}ms")
+                }
 
-              try {
-                p.postMessage(resp)
-              } catch (e: Exception) {
-                Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
-              }
-
-              if (isTrace) {
-                Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$requestId")
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                  synchronized(portLock) {
+                    if (activePort == p && activePortGeneration.get() == reqPortGen) {
+                      try {
+                        p.postMessage(resp)
+                      } catch (e: Exception) {
+                        Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
+                      }
+                    }
+                  }
+                  if (isTrace) {
+                    Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$requestId")
+                  }
+                }
               }
             }
             "GET_COSMETIC_RESOURCES" -> {

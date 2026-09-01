@@ -39,6 +39,7 @@ class BlockExtensionTest {
     bridge = AdblockBridge.getInstance()
     bridge.compileRules("")
     blockExtension = BlockExtension.getInstance(bridge)
+    blockExtension.siteSecurityProvider = { false }
 
     val mockExtension = allocateInstance(WebExtension::class.java)
     ReflectionHelpers.setField(mockExtension, "id", "remmi_engine_extension")
@@ -406,7 +407,14 @@ class BlockExtensionTest {
     fun sendAndCapture1(msg: JSONObject): JSONObject {
       receivedMessages.clear()
       portDelegate1!!.onPortMessage(msg, mockPort1)
-      val resp = receivedMessages.poll()
+      var resp = receivedMessages.poll()
+      var attempts = 0
+      while (resp == null && attempts < 50) {
+          Thread.sleep(10)
+          org.robolectric.shadows.ShadowLooper.idleMainLooper()
+          resp = receivedMessages.poll()
+          attempts++
+      }
       assertNotNull("Must return exactly one response", resp)
       return resp!!
     }
@@ -479,7 +487,14 @@ class BlockExtensionTest {
     fun sendAndCapture2(msg: JSONObject): JSONObject {
       receivedMessages.clear()
       portDelegate2.onPortMessage(msg, mockPort2)
-      val resp = receivedMessages.poll()
+      var resp = receivedMessages.poll()
+      var attempts = 0
+      while (resp == null && attempts < 50) {
+          Thread.sleep(10)
+          org.robolectric.shadows.ShadowLooper.idleMainLooper()
+          resp = receivedMessages.poll()
+          attempts++
+      }
       assertNotNull("Must return exactly one response", resp)
       return resp!!
     }
@@ -566,6 +581,12 @@ class BlockExtensionTest {
     }
 
     // Verify exactly 100 responses, ALL must be SHOULD_BLOCK_RESULT, ZERO LOG messages
+    var attempts = 0
+    while (receivedMessages.size < 100 && attempts < 500) {
+        Thread.sleep(10)
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        attempts++
+    }
     assertEquals("Must receive exactly 100 responses for 100 requests", count, receivedMessages.size)
     val logMessages = receivedMessages.filter { it.optString("type") == "LOG" || it.optString("type") == "log" }
     assertEquals("There must be ZERO LOG messages on the blocking port", 0, logMessages.size)
@@ -606,6 +627,12 @@ class BlockExtensionTest {
     }
 
     // Verify exactly 100 responses and ZERO LOG message amplification
+    var attempts = 0
+    while (receivedMessages.size < 100 && attempts < 500) {
+        Thread.sleep(10)
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        attempts++
+    }
     assertEquals("Must receive exactly 100 responses for 100 failure requests", count, receivedMessages.size)
     val logMessages = receivedMessages.filter { it.optString("type") == "LOG" || it.optString("type") == "log" }
     assertEquals("There must be ZERO diagnostic LOG messages produced on error", 0, logMessages.size)
@@ -646,10 +673,17 @@ class BlockExtensionTest {
     assertNotNull("Port delegate must be registered", portDelegate)
 
     // Helper for sending and capturing
-    fun sendAndCapture(msg: JSONObject): JSONObject {
+    fun sendAndCapture(msg: JSONObject, timeoutWait: Int = 500): JSONObject {
       receivedMessages.clear()
       portDelegate!!.onPortMessage(msg, mockPort)
-      val resp = receivedMessages.poll()
+      var resp = receivedMessages.poll()
+      var attempts = 0
+      while (resp == null && attempts < timeoutWait) {
+          Thread.sleep(10)
+          org.robolectric.shadows.ShadowLooper.idleMainLooper()
+          resp = receivedMessages.poll()
+          attempts++
+      }
       assertNotNull("Must return response", resp)
       return resp!!
     }
@@ -682,50 +716,50 @@ class BlockExtensionTest {
       put("type", "SHOULD_BLOCK")
       put("requestId", "block_proof_single")
       put("url", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js")
-      put("sourceUrl", "https://example.com")
+      put("sourceUrl", "https://adblock-tester.com/")
       put("resourceType", "script")
       put("thirdParty", true)
       put("portGeneration", 1L)
       put("jsInstanceId", 1)
     }
     val singleBlockResp = sendAndCapture(singleBlockMsg)
-    assertTrue("Single SHOULD_BLOCK ok must be true", singleBlockResp.optBoolean("ok"))
-    assertTrue("Single SHOULD_BLOCK must cancel ad", singleBlockResp.optBoolean("cancel"))
+    assertTrue("Single SHOULD_BLOCK ok must be true: $singleBlockResp", singleBlockResp.optBoolean("ok"))
+    assertTrue("Single SHOULD_BLOCK must cancel ad: $singleBlockResp", singleBlockResp.optBoolean("cancel"))
     assertEquals("Single SHOULD_BLOCK generation must match", 1L, singleBlockResp.optLong("portGeneration"))
 
     // 4. 10 Sequential requests proof
     for (i in 0 until 10) {
       val isAd = (i % 2 == 0)
-      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://example.com/item_$i.js"
+      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://adblock-tester.com/item_$i.js"
       val req = JSONObject().apply {
         put("type", "SHOULD_BLOCK")
         put("requestId", "seq10_req_$i")
         put("url", url)
-        put("sourceUrl", "https://example.com")
+        put("sourceUrl", "https://adblock-tester.com/")
         put("resourceType", "script")
         put("thirdParty", isAd)
         put("portGeneration", 1L)
       }
       val resp = sendAndCapture(req)
-      assertTrue("Seq10 request $i must succeed", resp.optBoolean("ok"))
-      assertEquals("Seq10 request $i cancel must match", isAd, resp.optBoolean("cancel"))
+      assertTrue("Seq10 request $i must succeed: $resp", resp.optBoolean("ok"))
+      assertEquals("Seq10 request $i cancel must match: $resp", isAd, resp.optBoolean("cancel"))
       assertEquals("Seq10 portGeneration must match", 1L, resp.optLong("portGeneration"))
     }
 
     // 5. 100 Sequential requests proof
     for (i in 0 until 100) {
       val isAd = (i % 2 == 0)
-      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://example.com/item_$i.js"
+      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://adblock-tester.com/item_$i.js"
       val req = JSONObject().apply {
         put("type", "SHOULD_BLOCK")
         put("requestId", "seq100_req_$i")
         put("url", url)
-        put("sourceUrl", "https://example.com")
+        put("sourceUrl", "https://adblock-tester.com/")
         put("resourceType", "script")
         put("thirdParty", isAd)
         put("portGeneration", 1L)
       }
-      val resp = sendAndCapture(req)
+      val resp = sendAndCapture(req, timeoutWait = 500)
       assertTrue("Seq100 request $i must succeed", resp.optBoolean("ok"))
       assertEquals("Seq100 request $i cancel must match", isAd, resp.optBoolean("cancel"))
     }
@@ -736,12 +770,12 @@ class BlockExtensionTest {
     val futures = (0 until 100).map { i ->
       executor.submit<Unit> {
         val isAd = (i % 2 == 0)
-        val url = if (isAd) "https://doubleclick.net/ad_conc_$i.js" else "https://example.com/conc_$i.js"
+        val url = if (isAd) "https://doubleclick.net/ad_conc_$i.js" else "https://adblock-tester.com/conc_$i.js"
         val req = JSONObject().apply {
           put("type", "SHOULD_BLOCK")
           put("requestId", "conc100_req_$i")
           put("url", url)
-          put("sourceUrl", "https://example.com")
+          put("sourceUrl", "https://adblock-tester.com/")
           put("resourceType", "script")
           put("thirdParty", isAd)
           put("portGeneration", 1L)
@@ -751,6 +785,13 @@ class BlockExtensionTest {
     }
     futures.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
     executor.shutdown()
+
+    var concAttempts = 0
+    while (receivedMessages.size < 100 && concAttempts < 500) {
+        Thread.sleep(10)
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        concAttempts++
+    }
 
     assertEquals("Must receive all 100 concurrent responses", 100, receivedMessages.size)
     val concurrentLogCount = receivedMessages.filter { it.optString("type") == "LOG" }.size

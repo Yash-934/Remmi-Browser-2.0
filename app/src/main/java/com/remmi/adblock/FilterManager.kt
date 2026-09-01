@@ -147,6 +147,7 @@ class FilterManager(
       } else sub
     }
     saveCustomSubscriptions(_subscriptions.value.filter { it.isCustom })
+    isRulesLoaded = false
     loadPersistedRulesIntoBridge()
   }
 
@@ -177,6 +178,7 @@ class FilterManager(
       val file = File(dir, "$id.txt")
       if (file.exists()) file.delete()
     }
+    isRulesLoaded = false
     loadPersistedRulesIntoBridge()
   }
 
@@ -200,8 +202,14 @@ class FilterManager(
     Log.i(TAG, "[ADBLOCK_METRICS] blocked=$blockedCount")
   }
 
+  private var isRulesLoaded = false
+  private var cachedRulesCount = 0
+
   private suspend fun loadPersistedRulesIntoBridgeAsync(): Int = withContext(Dispatchers.IO) {
     mutex.withLock {
+      if (isRulesLoaded) {
+        return@withLock cachedRulesCount
+      }
       val dir = filterDir ?: return@withLock 0
       Log.d(TAG, "[ADBLOCK_FILTER_LOAD_START]")
       val defaultRules = StringBuilder()
@@ -237,11 +245,15 @@ class FilterManager(
         Log.d(TAG, "[ADBLOCK_COMPILE] name=all compiled=$compiled")
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=$compiled")
         logAdblockStatus()
+        isRulesLoaded = true
+        cachedRulesCount = compiled
         return@withLock compiled
       } else {
         Log.d(TAG, "[ADBLOCK_RULES] $rulesSummary total_compiled=0 (using default tracker rules)")
         logAdblockStatus()
       }
+      isRulesLoaded = true
+      cachedRulesCount = 0
       return@withLock 0
     }
   }
@@ -368,7 +380,8 @@ class FilterManager(
       } else {
         saveCustomSubscriptions(_subscriptions.value.filter { it.isCustom })
       }
-
+      
+      isRulesLoaded = false
       return@withContext true
     } catch (e: Throwable) {
       Log.e(TAG, "Exception downloading filter ${sub.id}: ${e.message}")

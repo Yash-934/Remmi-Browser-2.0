@@ -128,9 +128,18 @@ class GeckoEngineManager private constructor(private val context: Context) {
     check(isMain) { "Gecko operation $operation MUST be called on the Main thread! (Current: ${Thread.currentThread().name})" }
   }
 
-  fun initializeRuntimeAsync() {
+  fun initializeRuntimeAsync(): CompletableDeferred<GeckoRuntime> {
+    val existingDeferred = initDeferred
+    if (existingDeferred != null) return existingDeferred
+    val newDeferred = CompletableDeferred<GeckoRuntime>()
+    initDeferred = newDeferred
+
     if (_initState.value != GeckoInitState.NOT_STARTED && _initState.value != GeckoInitState.FAILED) {
-      return
+      // If already started and we just created the deferred, wait for runtime to be set
+      if (runtime != null) {
+          newDeferred.complete(runtime!!)
+      }
+      return newDeferred
     }
 
     _initState.value = GeckoInitState.INITIALIZING
@@ -141,11 +150,14 @@ class GeckoEngineManager private constructor(private val context: Context) {
         initializeRuntimeInternal()
         _initState.value = GeckoInitState.READY
         Log.i(TAG, "STATE_LOG: GECKO_INIT_READY (time=${android.os.SystemClock.elapsedRealtime()})")
+        newDeferred.complete(runtime!!)
       } catch (t: Throwable) {
         _initState.value = GeckoInitState.FAILED
         Log.e(TAG, "STATE_LOG: GECKO_INIT_FAILED (time=${android.os.SystemClock.elapsedRealtime()}) error=${t.message}")
+        newDeferred.completeExceptionally(t)
       }
     }
+    return newDeferred
   }
 
   private suspend fun initializeRuntimeInternal() {
@@ -693,14 +705,16 @@ class GeckoEngineManager private constructor(private val context: Context) {
     assertMainThread("LOAD_URL id=$tabId")
     android.util.Log.i(TAG, "STATE_LOG: FIRST_PAGE_START (time=${android.os.SystemClock.elapsedRealtime()})")
     
-    if (_initState.value == GeckoInitState.NOT_STARTED) {
-      Log.d(TAG, "[GECKO] loadUrl requesting init on tabId=$tabId")
-      initializeRuntimeAsync()
-    }
-
     if (runtime == null || _initState.value != GeckoInitState.READY) {
-      Log.d(TAG, "[GECKO] loadUrl runtime not ready yet, deferring 50ms for tabId=$tabId")
-      mainHandler.postDelayed({ loadUrl(tabId, targetUrl) }, 50)
+      Log.d(TAG, "[GECKO] loadUrl runtime not ready yet, awaiting init on tabId=$tabId")
+      CoroutineScope(Dispatchers.Main.immediate).launch {
+        try {
+          initializeRuntimeAsync().await()
+          loadUrl(tabId, targetUrl)
+        } catch (e: Exception) {
+          Log.e(TAG, "[GECKO] Failed to initialize runtime for loadUrl on tabId=$tabId", e)
+        }
+      }
       return
     }
     val session = activeSessions[tabId] ?: run {
