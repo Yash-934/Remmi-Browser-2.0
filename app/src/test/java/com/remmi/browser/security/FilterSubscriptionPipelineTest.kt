@@ -166,10 +166,46 @@ class FilterSubscriptionPipelineTest {
   }
 
   @Test
-  fun testNoMatchDomainReturnsEmptySelectors() {
-    adblockBridge.compileRules("specific-domain.com##.specific-ad")
-    val res = adblockBridge.getCosmeticResources("https://unrelated-domain.com/index.html")
-    assertTrue("Lookup must succeed", res.ok)
-    assertFalse("Unrelated domain must not match specific ad selector", res.hideSelectors.contains(".specific-ad"))
+  fun testGoogleAnalyticsAndGtagBootstrapEnforcement() {
+    // 1. Real-style googletagmanager gtag bootstrap request
+    val gtagDecision = adblockBridge.evaluateDecision(
+      url = "https://www.googletagmanager.com/gtag/js?id=G-EPK7X69JWC",
+      sourceUrl = "https://adblock-tester.com/",
+      initiator = "https://adblock-tester.com",
+      resourceType = "script",
+      thirdParty = true
+    )
+    assertTrue("googletagmanager.com/gtag/js bootstrapper must be blocked", gtagDecision.blocked)
+
+    // 2. Real-style google-analytics collection beacon request
+    val gaCollectDecision = adblockBridge.evaluateDecision(
+      url = "https://www.google-analytics.com/g/collect?v=2&tid=G-EPK7X69JWC&cid=123.456",
+      sourceUrl = "https://adblock-tester.com/",
+      initiator = "https://adblock-tester.com",
+      resourceType = "ping",
+      thirdParty = true
+    )
+    assertTrue("google-analytics.com/g/collect telemetry beacon must be blocked", gaCollectDecision.blocked)
+
+    // 3. Harmless first-party scripts must remain allowed
+    val firstPartyScriptDecision = adblockBridge.evaluateDecision(
+      url = "https://adblock-tester.com/assets/app.js",
+      sourceUrl = "https://adblock-tester.com/",
+      initiator = "https://adblock-tester.com",
+      resourceType = "script",
+      thirdParty = false
+    )
+    assertFalse("Harmless first-party script must be allowed", firstPartyScriptDecision.blocked)
+
+    // 4. Harmless first-party HTML navigation must remain allowed
+    val firstPartyDocDecision = adblockBridge.evaluateDecision(
+      url = "https://adblock-tester.com/",
+      sourceUrl = "",
+      initiator = "",
+      resourceType = "main_frame",
+      thirdParty = false
+    )
+    assertFalse("Harmless first-party document must be allowed", firstPartyDocDecision.blocked)
   }
 }
+

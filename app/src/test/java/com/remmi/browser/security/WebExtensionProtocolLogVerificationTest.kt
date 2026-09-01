@@ -34,6 +34,7 @@ class WebExtensionProtocolLogVerificationTest {
   @Test
   fun testDirectShouldBlockProtocolVerification() = runBlocking {
     val bridge = AdblockBridge.getInstance()
+    bridge.loadDefaultTrackerRules(compileToNative = bridge.isNativeLoaded)
     
     // 1. Direct Bridge matching logs check
     val decision = bridge.evaluateDecision(

@@ -8,7 +8,7 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-adblock = { version = "0.8", default-features = false }
+adblock = { version = "0.8", default-features = false, features = ["embedded-domain-resolver"] }
 rmp = "=0.8.11"
 jni = { version = "0.21", default-features = false }
 lazy_static = "1.4"

@@ -156,7 +156,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatchesJson(
             Err(_) => return std::ptr::null_mut(),
         };
 
-        let source_url = ctx.source_url.unwrap_or_default();
+        let source_url = ctx.source_url.clone().unwrap_or_default();
         if let Ok(mut req) = Request::new(&ctx.url, &source_url, &ctx.resource_type) {
             // Wait, we need to handle method and third_party in the future?
             // Actually, we can use the advanced adblock::request API to set method and third_party if available,
@@ -214,9 +214,9 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeMatchesJson(
                 GLOBAL_STATE.allowed_count.fetch_add(1, Ordering::Relaxed);
             }
             
-            let is_test_request = ctx.url.contains("tester_target_trigger");
+            let is_test_request = ctx.url.contains("tester_target_trigger") || ctx.url.contains("googletagmanager") || ctx.url.contains("google-analytics");
             if is_test_request {
-                let actual_third_party = req.is_third_party();
+                let actual_third_party = req.is_third_party;
                 println!("[AB_REQUEST_IN]");
                 println!("requestType={}", ctx.resource_type);
                 println!("method={}", ctx.method);
@@ -429,7 +429,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
             })
         };
 
-        let default_guard = match GLOBAL_STATE.default_engine.read() {
+        let engines_guard = match GLOBAL_STATE.engines.read() {
             Ok(g) => g,
             Err(_) => {
                 let resp = CosmeticResponse {
@@ -449,7 +449,6 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
                 };
             }
         };
-        let additional_guard = GLOBAL_STATE.additional_engine.read().ok();
 
         let mut hide_selectors: HashSet<String> = HashSet::new();
         let mut force_hide_selectors: HashSet<String> = HashSet::new();
@@ -458,7 +457,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
 
         let is_aggressive = aggressive != 0;
 
-        if let Some(ref engine) = *default_guard {
+        if let Some(ref engine) = engines_guard.default_engine {
             let cosmetic_resources = engine.url_cosmetic_resources(&url_str);
             hide_selectors.extend(cosmetic_resources.hide_selectors);
             
@@ -475,20 +474,20 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetCosmeticRes
             }
         }
 
-        if let Some(guard) = additional_guard {
-            if let Some(ref engine) = *guard {
-                let cosmetic_resources = engine.url_cosmetic_resources(&url_str);
-                force_hide_selectors.extend(cosmetic_resources.hide_selectors);
-                
+        if let Some(ref engine) = engines_guard.additional_engine {
+            let cosmetic_resources = engine.url_cosmetic_resources(&url_str);
+            force_hide_selectors.extend(cosmetic_resources.hide_selectors);
+            
+            if is_aggressive {
                 if !cosmetic_resources.injected_script.is_empty() {
                     procedural.insert(cosmetic_resources.injected_script);
                 }
-                generics = generics || cosmetic_resources.generichide;
+            }
+            generics = generics || cosmetic_resources.generichide;
 
-                if !classes_vec.is_empty() || !ids_vec.is_empty() {
-                    let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-                    force_hide_selectors.extend(hidden);
-                }
+            if !classes_vec.is_empty() || !ids_vec.is_empty() {
+                let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
+                force_hide_selectors.extend(hidden);
             }
         }
 
@@ -568,7 +567,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
             })
         };
 
-        let default_guard = match GLOBAL_STATE.default_engine.read() {
+        let engines_guard = match GLOBAL_STATE.engines.read() {
             Ok(g) => g,
             Err(_) => {
                 let resp = CosmeticResponse {
@@ -588,21 +587,18 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetHiddenClass
                 };
             }
         };
-        let additional_guard = GLOBAL_STATE.additional_engine.read().ok();
 
         let mut hide_selectors: HashSet<String> = HashSet::new();
         let mut force_hide_selectors: HashSet<String> = HashSet::new();
 
-        if let Some(ref engine) = *default_guard {
+        if let Some(ref engine) = engines_guard.default_engine {
             let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
             hide_selectors.extend(hidden);
         }
 
-        if let Some(guard) = additional_guard {
-            if let Some(ref engine) = *guard {
-                let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
-                force_hide_selectors.extend(hidden);
-            }
+        if let Some(ref engine) = engines_guard.additional_engine {
+            let hidden = engine.hidden_class_id_selectors(&classes_vec, &ids_vec, &exceptions_set);
+            force_hide_selectors.extend(hidden);
         }
 
         let resp = CosmeticResponse {
@@ -656,7 +652,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetGeneration(
     _class: JClass,
 ) -> jlong {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        GLOBAL_STATE.generation.load(Ordering::Relaxed) as jlong
+        GLOBAL_STATE.engines.read().unwrap().generation as jlong
     }));
     result.unwrap_or(0)
 }
@@ -667,7 +663,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetEngineGener
     _class: JClass,
 ) -> jlong {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        GLOBAL_STATE.generation.load(Ordering::Relaxed) as jlong
+        GLOBAL_STATE.engines.read().unwrap().generation as jlong
     }));
     result.unwrap_or(0)
 }
@@ -770,7 +766,7 @@ pub extern "system" fn Java_com_remmi_adblock_AdblockBridge_nativeGetAbi(
 mod tests {
     use super::*;
     use adblock::lists::{FilterSet, ParseOptions};
-    use adblock::engine::Engine;
+    use adblock::Engine;
     use adblock::request::Request;
 
     #[test]
@@ -841,3 +837,4 @@ mod tests {
         println!("=== DIAGNOSTIC END ===\n");
     }
 }
+

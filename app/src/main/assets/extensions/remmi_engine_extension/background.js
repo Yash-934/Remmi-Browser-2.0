@@ -469,7 +469,15 @@ async function getNativeDecision(details, cacheKey) {
       rulesGeneration = response.generation;
     }
 
-    return response.cancel === true;
+    return {
+      cancel: response.cancel === true,
+      redirect: response.redirectUrl || response.redirect || null,
+      rewrittenUrl: response.rewrittenUrl || null,
+      csp: response.csp || null,
+      ruleId: response.ruleId || null,
+      ruleSource: response.ruleSource || null,
+      generation: response.generation || rulesGeneration
+    };
   })();
 
   INFLIGHT_DECISIONS.set(cacheKey, promise);
@@ -533,20 +541,17 @@ browser.webRequest.onBeforeRequest.addListener(
     );
 
     try {
-      
-    // --- TRACE ---
-    if (url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager")) {
-      const traceId = details.requestId || Math.random().toString(36).substring(7);
-      logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
-      
-      const traceResponse = await getNativeDecision(details, cacheKey);
-      logToNative(`[AB_ENFORCEMENT_RESULT] requestId=${traceId} cancel=${traceResponse.cancel}`);
-      
-      // We will trace completed/error in another listener
-    }
-    // --- END TRACE ---
+      // --- TRACE ---
+      if (url.includes("google-analytics.com") || url.includes("adblock-tester.com") || url.includes("googletagmanager")) {
+        const traceId = details.requestId || Math.random().toString(36).substring(7);
+        logToNative(`[AB_REQUEST_IN] requestId=${traceId} url=${url} type=${details.type} method=${details.method}`);
+        
+        const traceResponse = await getNativeDecision(details, cacheKey);
+        logToNative(`[AB_ENFORCEMENT_RESULT] requestId=${traceId} cancel=${traceResponse.cancel}`);
+      }
+      // --- END TRACE ---
 
-    const response = await getNativeDecision(details, cacheKey);
+      const response = await getNativeDecision(details, cacheKey);
       const shouldCancel = response.cancel === true;
       if (isIdempotent && !response.redirect && !response.rewrittenUrl && !response.csp) {
         setCachedDecision(cacheKey, shouldCancel, resType);
