@@ -2,13 +2,20 @@
 // CRITICAL SECURITY INVARIANT: Native Gecko layer is the SOLE authoritative proxy manager.
 // The WebExtension does NOT modify browser.proxy or route settings.
 
+// Port Health State Machine: DISCONNECTED -> CONNECTING -> CONNECTED -> HEALTHY / DEGRADED
 let port = null;
+let portState = "DISCONNECTED";
+let portGeneration = 0;
+let portInstanceId = 0;
 let isConnecting = false;
 let reconnectTimer = null;
+let reqSequence = 0;
+
+const pendingRequests = new Map();
 const pendingMessages = [];
 
 function logToNative(msg) {
-  if (port) {
+  if (port && (portState === "HEALTHY" || portState === "CONNECTED")) {
     try {
       port.postMessage({ type: "LOG", message: msg, action: "log", msg: msg });
     } catch (_e) {}
@@ -16,7 +23,7 @@ function logToNative(msg) {
 }
 
 function flushPendingMessages() {
-  if (!port) return;
+  if (!port || portState !== "HEALTHY") return;
   while (pendingMessages.length > 0) {
     const msg = pendingMessages.shift();
     try {
@@ -26,24 +33,6 @@ function flushPendingMessages() {
       break;
     }
   }
-}
-
-function withTimeout(promise, timeoutMs, timeoutName = "native_timeout") {
-  let timer = null;
-  const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new Error(timeoutName);
-      err.name = "TimeoutError";
-      reject(err);
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  });
 }
 
 function isTraceCandidateUrl(url) {
@@ -56,23 +45,113 @@ function isTraceCandidateUrl(url) {
   );
 }
 
+// Exactly-once correlated messaging on the persistent native port
+function sendPortMessage(type, payload = {}, timeoutMs = 1500, timeoutErrorName = "NATIVE_RESPONSE_TIMEOUT") {
+  return new Promise((resolve, reject) => {
+    // If port is not healthy and this is not an initial PING handshake, reject early
+    if (portState !== "HEALTHY" && type !== "PING") {
+      const err = new Error(`port_not_ready_${portState}`);
+      err.name = portState === "DISCONNECTED" ? "PORT_DISCONNECTED" : "PORT_NOT_READY";
+      return reject(err);
+    }
+
+    if (!port) {
+      const err = new Error("port_disconnected");
+      err.name = "PORT_DISCONNECTED";
+      return reject(err);
+    }
+
+    const currentGen = portGeneration;
+    const reqId = `${type.toLowerCase()}_${++reqSequence}_${Date.now()}`;
+    let isSettled = false;
+
+    const timer = setTimeout(() => {
+      if (isSettled) return;
+      isSettled = true;
+      pendingRequests.delete(reqId);
+      const err = new Error(timeoutErrorName);
+      err.name = timeoutErrorName === "NATIVE_DECISION_TIMEOUT" ? "NATIVE_MESSAGE_QUEUE_TIMEOUT" : timeoutErrorName;
+      reject(err);
+    }, timeoutMs);
+
+    pendingRequests.set(reqId, {
+      resolve: (data) => {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(timer);
+        pendingRequests.delete(reqId);
+        resolve(data);
+      },
+      reject: (err) => {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(timer);
+        pendingRequests.delete(reqId);
+        reject(err);
+      },
+      timer: timer,
+      portGeneration: currentGen,
+      sendTs: Date.now(),
+      type: type
+    });
+
+    try {
+      port.postMessage({
+        type: type,
+        requestId: reqId,
+        portGeneration: currentGen,
+        ...payload
+      });
+    } catch (sendErr) {
+      if (isSettled) return;
+      isSettled = true;
+      clearTimeout(timer);
+      pendingRequests.delete(reqId);
+      const err = new Error("port_send_failed");
+      err.name = "PORT_DISCONNECTED";
+      reject(err);
+    }
+  });
+}
+
+// 1. Initial Handshake & Diagnostic PING
+async function executeInitialPing(instanceId, generation) {
+  const pingStart = Date.now();
+  logToNative(`[PING_SEND] instanceId=${instanceId} generation=${generation} ts=${pingStart}`);
+  try {
+    const res = await sendPortMessage("PING", {}, 2000, "PING_TIMEOUT");
+    const pingElapsed = Date.now() - pingStart;
+    if (res && res.ok === true && res.pong === true) {
+      if (portGeneration === generation) {
+        portState = "HEALTHY";
+        logToNative(`[PING_SUCCESS] instanceId=${instanceId} generation=${generation} elapsedMs=${pingElapsed}`);
+        logToNative(`[PORT_RECONNECT_SUCCESS] instanceId=${instanceId} generation=${generation} ts=${Date.now()}`);
+        flushPendingMessages();
+      }
+      return true;
+    } else {
+      portState = "DEGRADED";
+      logToNative(`[PORT_ERROR] instanceId=${instanceId} generation=${generation} error=invalid_ping_response`);
+      return false;
+    }
+  } catch (pingErr) {
+    portState = "DEGRADED";
+    logToNative(`[PORT_ERROR] instanceId=${instanceId} generation=${generation} error=${pingErr?.name || pingErr?.message || String(pingErr)}`);
+    return false;
+  }
+}
+
 async function runPingBenchmark(count = 100) {
   const latencies = [];
   let successes = 0;
   let failures = 0;
 
   for (let i = 0; i < count; i++) {
-    const reqId = `ping_${i}_${Date.now()}`;
+    const reqId = `ping_bm_${i}_${Date.now()}`;
     const start = Date.now();
     try {
       logToNative(`[NM_SEND_START] requestId=${reqId} messageType=PING`);
-      const res = await withTimeout(
-        browser.runtime.sendNativeMessage("remmi_engine_extension", {
-          type: "PING",
-          requestId: reqId
-        }),
-        1500
-      );
+      const res = await sendPortMessage("PING", {}, 1500, "NATIVE_RESPONSE_TIMEOUT");
       const elapsed = Date.now() - start;
       if (res && res.ok === true && res.pong === true) {
         successes++;
@@ -80,12 +159,11 @@ async function runPingBenchmark(count = 100) {
         logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
       } else {
         failures++;
-        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=bad_pong`);
+        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_RESPONSE errorMessage=bad_pong`);
       }
     } catch (e) {
       failures++;
-      let errName = "NATIVE_MESSAGE_FAILURE";
-      if (e?.message === "native_timeout") errName = "NATIVE_TIMEOUT";
+      const errName = e?.name || "NATIVE_MESSAGE_FAILURE";
       logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
     }
   }
@@ -99,76 +177,87 @@ async function runPingBenchmark(count = 100) {
   return { successes, failures, p50, p95, max };
 }
 
-async function nativePing() {
-  const reqId = `ping_init_${Date.now()}`;
-  try {
-    logToNative(`[NM_SEND_START] requestId=${reqId} messageType=PING`);
-    const startTs = Date.now();
-    const res = await withTimeout(
-      browser.runtime.sendNativeMessage("remmi_engine_extension", {
-        type: "PING",
-        requestId: reqId
-      }),
-      1500
-    );
-    const elapsed = Date.now() - startTs;
-    if (res && res.ok === true) {
-      logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsed}`);
-      logToNative(`[WEBEXT_PING_RESULT] ok=true pong=${res.pong}`);
-    } else {
-      logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=invalid_response`);
-      logToNative(`[WEBEXT_PING_RESULT] ok=false pong=false`);
-    }
-    return res;
-  } catch (e) {
-    let errName = "NATIVE_MESSAGE_FAILURE";
-    if (e?.message === "native_timeout") errName = "NATIVE_TIMEOUT";
-    logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
-    logToNative(`[WEBEXT_PING_ERROR] error=${e?.message || String(e)}`);
-    return null;
-  }
-}
-
+// 2. Native Port Connection & Lifecycle Management
 function connectNative() {
   if (isConnecting) return;
   isConnecting = true;
+  portState = "CONNECTING";
+
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
 
+  portGeneration++;
+  const currentGen = portGeneration;
+  const currentInst = ++portInstanceId;
+  const startTs = Date.now();
+
+  logToNative(`[PORT_CONNECT_START] instanceId=${currentInst} generation=${currentGen} ts=${startTs}`);
+
+  // Discard any existing pending requests from previous generation
+  for (const [rId, entry] of pendingRequests.entries()) {
+    clearTimeout(entry.timer);
+    const err = new Error("port_reconnecting");
+    err.name = "PORT_DISCONNECTED";
+    entry.reject(err);
+  }
+  pendingRequests.clear();
+
   try {
     port = browser.runtime.connectNative("remmi_engine_extension");
     if (!port) {
-      console.warn("[Remmi] connectNative returned null");
+      logToNative(`[PORT_RECONNECT_FAILURE] instanceId=${currentInst} generation=${currentGen} ts=${Date.now()} error=null_port`);
+      portState = "DISCONNECTED";
       isConnecting = false;
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(connectNative, 3000);
+      }
       return;
     }
-    console.log("[Remmi] connectNative SUCCESS");
+
+    portState = "CONNECTED";
+    logToNative(`[PORT_CONNECTED] instanceId=${currentInst} generation=${currentGen} ts=${Date.now()}`);
 
     try {
       port.postMessage({
         type: "PORT_STATUS",
         status: "CONNECTED",
-        role: "AD_TRACKER_BLOCKER_ONLY"
+        role: "AD_TRACKER_BLOCKER_ONLY",
+        instanceId: currentInst,
+        generation: currentGen
       });
     } catch (_err) {}
 
-    flushPendingMessages();
-    isConnecting = false;
-
-    // Run native ping diagnostic test
-    nativePing();
-
     port.onMessage.addListener((msg) => {
       if (!msg) return;
+
+      // Check if message is a response to a pending request
+      if (msg.requestId && pendingRequests.has(msg.requestId)) {
+        const entry = pendingRequests.get(msg.requestId);
+        if (msg.portGeneration !== undefined && msg.portGeneration !== entry.portGeneration) {
+          // Discard response belonging to old port generation safely
+          return;
+        }
+
+        if (msg.ok === false) {
+          const err = new Error(msg.error || "NATIVE_HANDLER_ERROR");
+          err.name = "NATIVE_HANDLER_ERROR";
+          entry.reject(err);
+        } else {
+          entry.resolve(msg);
+        }
+        return;
+      }
+
+      // Handle server-push / broadcast messages
       if (msg.type === "CLEAR_CACHE" || msg.type === "RULES_UPDATED") {
         rulesGeneration++;
         DECISION_CACHE.clear();
         INFLIGHT_DECISIONS.clear();
         COSMETIC_CACHE.clear();
         INFLIGHT_COSMETIC.clear();
-        console.log(`[Remmi] Decision and cosmetic cache cleared on rules/profile update (gen=${rulesGeneration})`);
+        console.log(`[Remmi] Cache cleared on rules update (gen=${rulesGeneration})`);
       } else if (msg.type === "PROFILE_CHANGED") {
         currentProfile = msg.profile || "SHIELD";
         rulesGeneration++;
@@ -176,7 +265,7 @@ function connectNative() {
         INFLIGHT_DECISIONS.clear();
         COSMETIC_CACHE.clear();
         INFLIGHT_COSMETIC.clear();
-        console.log(`[Remmi] Profile changed to ${currentProfile}, cleared decision/cosmetic cache (gen=${rulesGeneration})`);
+        console.log(`[Remmi] Profile changed to ${currentProfile} (gen=${rulesGeneration})`);
       } else if (msg.type === "EXTRACT_HTML") {
         const requestId = msg.requestId;
         const tabId = msg.tabId;
@@ -185,12 +274,12 @@ function connectNative() {
             code: "document.documentElement.outerHTML;"
           }).then((res) => {
             let html = (res && res[0]) ? res[0] : "";
-            const MAX_HTML_BYTES = 2 * 1024 * 1024; // 2MB limit for bridge
+            const MAX_HTML_BYTES = 2 * 1024 * 1024;
             if (new Blob([html]).size > MAX_HTML_BYTES) {
-               html = html.substring(0, MAX_HTML_BYTES) + "<!-- Truncated by Remmi Native Bridge -->";
+              html = html.substring(0, MAX_HTML_BYTES) + "<!-- Truncated by Remmi Native Bridge -->";
             }
             if (port) port.postMessage({ type: "EXTRACTED_HTML", html: html, url: "", requestId: requestId, tabId: tabId });
-          }).catch(e => {
+          }).catch(_e => {
             if (port) port.postMessage({ type: "EXTRACTED_HTML", html: "", url: "", requestId: requestId, tabId: tabId });
           });
         }
@@ -208,16 +297,36 @@ function connectNative() {
     });
 
     port.onDisconnect.addListener(() => {
-      console.warn("[Remmi] connectNative onDisconnect");
+      const dTs = Date.now();
+      logToNative(`[PORT_DISCONNECT] instanceId=${currentInst} generation=${currentGen} ts=${dTs}`);
       port = null;
+      portState = "DISCONNECTED";
       isConnecting = false;
+
+      // Reject pending requests on disconnect
+      for (const [rId, entry] of pendingRequests.entries()) {
+        clearTimeout(entry.timer);
+        const err = new Error("port_disconnected");
+        err.name = "PORT_DISCONNECTED";
+        entry.reject(err);
+      }
+      pendingRequests.clear();
+
       if (!reconnectTimer) {
+        logToNative(`[PORT_RECONNECT_START] instanceId=${currentInst + 1} nextGeneration=${portGeneration + 1} ts=${Date.now()}`);
         reconnectTimer = setTimeout(connectNative, 3000);
       }
     });
+
+    // PING MUST BE THE FIRST TEST before enabling network or cosmetic traffic
+    executeInitialPing(currentInst, currentGen).finally(() => {
+      isConnecting = false;
+    });
+
   } catch (_e) {
-    console.error("[Remmi] connectNative FAILED", _e);
+    logToNative(`[PORT_RECONNECT_FAILURE] instanceId=${currentInst} generation=${currentGen} ts=${Date.now()} error=${_e?.message || String(_e)}`);
     port = null;
+    portState = "DISCONNECTED";
     isConnecting = false;
     if (!reconnectTimer) {
       reconnectTimer = setTimeout(connectNative, 5000);
@@ -227,7 +336,7 @@ function connectNative() {
 
 connectNative();
 
-// Priority scheduling for low-priority dynamic cosmetic queries
+// 3. Priority scheduling for dynamic cosmetic queries
 const MAX_CONCURRENT_CLASS_ID_COSMETICS = 2;
 let activeClassIdCosmetics = 0;
 const classIdCosmeticQueue = [];
@@ -283,13 +392,12 @@ function setCachedCosmetic(key, data) {
   });
 }
 
-// 1. Content Script Message Listener: Forward CLICK_INSPECTED, GET_COSMETIC_RESOURCES, GET_HIDDEN_CLASS_ID_SELECTORS
+// 4. Content Script Message Listener (Cosmetics & Click Inspection)
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message) return;
   
-  // Validate sender context
   if (!_sender || !_sender.tab || !_sender.tab.url || !_sender.tab.url.startsWith("http")) {
-      return;
+    return;
   }
 
   if (message.type === "CLICK_INSPECTED") {
@@ -302,7 +410,7 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       timestamp: message.timestamp || Date.now()
     };
 
-    if (port) {
+    if (port && portState === "HEALTHY") {
       try {
         port.postMessage(payload);
       } catch (_e) {
@@ -316,6 +424,12 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "GET_COSMETIC_RESOURCES") {
+    // COSMETIC ISOLATION: Until network blocking is healthy, cosmetic traffic must be disabled or strictly deferred
+    if (portState !== "HEALTHY") {
+      if (sendResponse) sendResponse({ ok: true, hideSelectors: [], forceHideSelectors: [], procedural: [], proceduralCount: 0, generics: false });
+      return true;
+    }
+
     const url = message.url || (_sender.tab ? _sender.tab.url : "");
     const hostname = message.hostname || "";
     const cacheKey = [
@@ -339,33 +453,24 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
     }
 
-    const reqId = "cosmetic_" + Math.random().toString(36).substring(2, 9);
     const promise = (async () => {
       try {
         const startTs = Date.now();
-        const resp = await withTimeout(
-          browser.runtime.sendNativeMessage("remmi_engine_extension", {
-            type: "GET_COSMETIC_RESOURCES",
-            requestId: reqId,
-            url: url,
-            hostname: hostname,
-            classes: message.classes || [],
-            ids: message.ids || [],
-            exceptions: message.exceptions || []
-          }),
-          2000,
-          "COSMETIC_RESOURCES_TIMEOUT"
-        );
+        const resp = await sendPortMessage("GET_COSMETIC_RESOURCES", {
+          url: url,
+          hostname: hostname,
+          classes: message.classes || [],
+          ids: message.ids || [],
+          exceptions: message.exceptions || []
+        }, 2000, "COSMETIC_RESOURCES_TIMEOUT");
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
           setCachedCosmetic(cacheKey, resp);
-        } else {
-          logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
-        let errCategory = e?.message === "COSMETIC_RESOURCES_TIMEOUT" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
-        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
+        const errCategory = e?.name || "NATIVE_MESSAGE_FAILURE";
+        logToNative(`[NM_SEND_ERROR] type=GET_COSMETIC_RESOURCES errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
         INFLIGHT_COSMETIC.delete(cacheKey);
@@ -380,6 +485,12 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "GET_HIDDEN_CLASS_ID_SELECTORS") {
+    // COSMETIC ISOLATION: Until network blocking is healthy, cosmetic traffic must be disabled or strictly deferred
+    if (portState !== "HEALTHY") {
+      if (sendResponse) sendResponse({ ok: true, hideSelectors: [] });
+      return true;
+    }
+
     const classes = message.classes || [];
     const ids = message.ids || [];
     const cacheKey = [
@@ -403,31 +514,22 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
     }
 
-    const reqId = "classid_" + Math.random().toString(36).substring(2, 9);
     const promise = scheduleClassIdCosmetic(async () => {
       try {
         const startTs = Date.now();
-        const resp = await withTimeout(
-          browser.runtime.sendNativeMessage("remmi_engine_extension", {
-            type: "GET_HIDDEN_CLASS_ID_SELECTORS",
-            requestId: reqId,
-            classes: classes,
-            ids: ids,
-            exceptions: message.exceptions || []
-          }),
-          2000,
-          "HIDDEN_CLASS_ID_TIMEOUT"
-        );
+        const resp = await sendPortMessage("GET_HIDDEN_CLASS_ID_SELECTORS", {
+          classes: classes,
+          ids: ids,
+          exceptions: message.exceptions || []
+        }, 2000, "HIDDEN_CLASS_ID_TIMEOUT");
         const elapsed = Date.now() - startTs;
         if (resp && resp.ok) {
           setCachedCosmetic(cacheKey, resp);
-        } else {
-          logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=INVALID_NATIVE_RESPONSE errorMessage=${resp?.error || "unknown"}`);
         }
         return resp || { ok: false, hideSelectors: [] };
       } catch (e) {
-        let errCategory = e?.message === "HIDDEN_CLASS_ID_TIMEOUT" ? "NATIVE_TIMEOUT" : "NATIVE_MESSAGE_FAILURE";
-        logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
+        const errCategory = e?.name || "NATIVE_MESSAGE_FAILURE";
+        logToNative(`[NM_SEND_ERROR] type=GET_HIDDEN_CLASS_ID_SELECTORS errorName=${errCategory} errorMessage=${e?.message || String(e)}`);
         return { ok: false, error: e?.message || "error", hideSelectors: [] };
       } finally {
         INFLIGHT_COSMETIC.delete(cacheKey);
@@ -445,17 +547,15 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-// 2. Delegate network requests to Native Engine with fast-path filtering and LRU decision caching
+// 5. Network Request Blocker with Persistent Port Delegation
 let currentProfile = "SHIELD";
 let rulesGeneration = 0;
 const DECISION_CACHE = new Map();
 const INFLIGHT_DECISIONS = new Map();
 
 const MAX_CACHE_SIZE = 800;
-const CACHE_TTL_MS = 300000; // 5 minutes default
 const NATIVE_DECISION_TIMEOUT_MS = 1500;
 
-// Blockable resource types policy
 const BLOCKABLE_TYPES = new Set([
   "main_frame",
   "sub_frame",
@@ -509,9 +609,7 @@ function getCacheTtl(resourceType) {
 
 function getCachedDecision(key) {
   const item = DECISION_CACHE.get(key);
-  if (!item) {
-    return null;
-  }
+  if (!item) return null;
   if (Date.now() - item.ts < item.ttl) {
     return item.cancel;
   }
@@ -522,9 +620,7 @@ function getCachedDecision(key) {
 function setCachedDecision(key, cancel, resourceType = "other") {
   if (DECISION_CACHE.size >= MAX_CACHE_SIZE) {
     const firstKey = DECISION_CACHE.keys().next().value;
-    if (firstKey) {
-      DECISION_CACHE.delete(firstKey);
-    }
+    if (firstKey) DECISION_CACHE.delete(firstKey);
   }
   DECISION_CACHE.set(key, {
     cancel: !!cancel,
@@ -596,31 +692,30 @@ async function getNativeDecision(details, cacheKey, requestId) {
       logToNative(`[NM_SEND_START] requestId=${reqId} messageType=SHOULD_BLOCK url=${details.url} ts=${startTs}`);
     }
 
+    // GATING: If port is not healthy, fail-open safely without queueing behind dead port
+    if (portState !== "HEALTHY") {
+      logToNative(`[PORT_NOT_READY] requestId=${reqId} portState=${portState}`);
+      return { cancel: false, generation: rulesGeneration };
+    }
+
     let response;
     try {
-      response = await withTimeout(
-        browser.runtime.sendNativeMessage(
-          "remmi_engine_extension",
-          {
-            type: "SHOULD_BLOCK",
-            requestId: reqId,
-            url: details.url,
-            sourceUrl: sourceUrl,
-            initiator: details.originUrl || "",
-            method: details.method || "GET",
-            resourceType: details.type || "other",
-            aggressive: currentProfile === "GHOST" || currentProfile === "TOR",
-            thirdParty: is3p
-          }
-        ),
+      response = await sendPortMessage(
+        "SHOULD_BLOCK",
+        {
+          url: details.url,
+          sourceUrl: sourceUrl,
+          initiator: details.originUrl || "",
+          method: details.method || "GET",
+          resourceType: details.type || "other",
+          aggressive: currentProfile === "GHOST" || currentProfile === "TOR",
+          thirdParty: is3p
+        },
         NATIVE_DECISION_TIMEOUT_MS,
         "NATIVE_DECISION_TIMEOUT"
       );
     } catch (e) {
-      let errName = "NATIVE_MESSAGE_FAILURE";
-      if (e?.message === "NATIVE_DECISION_TIMEOUT" || e?.name === "TimeoutError") {
-        errName = "NATIVE_MESSAGE_QUEUE_TIMEOUT";
-      }
+      const errName = e?.name || "NATIVE_MESSAGE_FAILURE";
       logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${e?.message || String(e)}`);
       throw e;
     }
@@ -628,14 +723,14 @@ async function getNativeDecision(details, cacheKey, requestId) {
     const elapsedMs = Date.now() - startTs;
 
     if (!response || response.ok !== true) {
-      const errName = response ? "NATIVE_DECISION_FAILURE" : "INVALID_NATIVE_RESPONSE";
+      const errName = response ? "NATIVE_HANDLER_ERROR" : "INVALID_RESPONSE";
       const errMsg = response?.error || "null_or_invalid_response";
       logToNative(`[NM_SEND_ERROR] requestId=${reqId} errorName=${errName} errorMessage=${errMsg}`);
       throw new Error(`native_decision_invalid:${errMsg}`);
     }
 
     if (isTrace) {
-      logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsedMs}`);
+      logToNative(`[NM_SEND_SUCCESS] requestId=${reqId} responseOk=true elapsedMs=${elapsedMs} cancel=${response.cancel}`);
     }
 
     if (response.generation && response.generation > rulesGeneration) {
@@ -669,32 +764,22 @@ browser.webRequest.onBeforeRequest.addListener(
       return { cancel: false };
     }
 
-    // Internal/non-network protocols never need the network blocker.
-    if (
-      !url.startsWith("http://") &&
-      !url.startsWith("https://")
-    ) {
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
       return { cancel: false };
     }
 
     const resType = details.type || "other";
     const method = (details.method || "GET").toUpperCase();
 
-    // Resource types outside the blocker policy stay on Gecko's normal network path.
     if (!BLOCKABLE_TYPES.has(resType)) {
       return { cancel: false };
     }
 
     BLOCKER_METRICS.requests++;
 
-    const isIdempotent =
-      method === "GET" ||
-      method === "HEAD" ||
-      method === "OPTIONS";
-
+    const isIdempotent = method === "GET" || method === "HEAD" || method === "OPTIONS";
     const cacheKey = buildDecisionKey(details);
 
-    // Fast path: cached decision.
     if (isIdempotent) {
       const cached = getCachedDecision(cacheKey);
       if (cached !== null) {
@@ -716,7 +801,6 @@ browser.webRequest.onBeforeRequest.addListener(
     }
 
     try {
-      // Execute single getNativeDecision call per request (NO duplicate decision calls)
       const response = await getNativeDecision(details, cacheKey, traceId);
       const shouldCancel = response.cancel === true;
 
@@ -756,25 +840,11 @@ browser.webRequest.onBeforeRequest.addListener(
         );
       }
       
-      let errorCategory = "NATIVE_MESSAGE_FAILURE";
-      if (e?.message === "NATIVE_DECISION_TIMEOUT" || e?.name === "TimeoutError") {
-        errorCategory = "NATIVE_MESSAGE_QUEUE_TIMEOUT";
-      } else if (e?.message?.startsWith("native_decision_invalid")) {
-        errorCategory = "INVALID_NATIVE_RESPONSE";
-      } else if (e?.message?.startsWith("native_decision_failure")) {
-        errorCategory = "NATIVE_DECISION_FAILURE";
-      }
-
+      const errorCategory = e?.name || "NATIVE_MESSAGE_FAILURE";
       logToNative(
         `[WEBEXT_NATIVE_ERROR] type=${resType} name=${errorCategory} message=${e?.message || String(e)}`
       );
 
-      /*
-       * IMPORTANT:
-       * Blocking failure must not destroy normal webpage rendering.
-       * Ghost/Tor routing security is enforced by the native route authority,
-       * not by the adblocker's failure path.
-       */
       return { cancel: false };
     }
   },

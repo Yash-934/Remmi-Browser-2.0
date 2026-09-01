@@ -89,6 +89,8 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
   @Volatile
   private var activePort: WebExtension.Port? = null
   private val portLock = Any()
+  private val portGeneration = java.util.concurrent.atomic.AtomicLong(1)
+  private val portInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
 
   fun setExtensionRegistered() {
     if (_extensionState.value == ExtensionState.NOT_REGISTERED) {
@@ -415,8 +417,20 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
   }
 
   override fun onConnect(port: WebExtension.Port) {
-    log("[WEBEXT] Native port connected: ${port.name}")
+    val instId = portInstanceCount.incrementAndGet()
+    val gen = portGeneration.incrementAndGet()
+    val ts = System.currentTimeMillis()
+    Log.d(TAG, "[PORT_CONNECTED] instanceId=$instId generation=$gen ts=$ts portName=${port.name}")
+    log("[WEBEXT] Native port connected (inst=$instId, gen=$gen)")
+
     synchronized(portLock) {
+      val prevPort = activePort
+      if (prevPort != null && prevPort != port) {
+        try {
+          Log.w(TAG, "[PORT_ISOLATION] Disconnecting previous port instance")
+          prevPort.disconnect()
+        } catch (_: Exception) {}
+      }
       activePort = port
       _extensionState.value = ExtensionState.CONNECTED
     }
@@ -430,9 +444,228 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           val msgText = message.optString("message").ifEmpty { message.optString("msg") }
           val status = message.optString("status")
           val requestId = message.optString("requestId")
+          val reqPortGen = message.optLong("portGeneration", gen)
           val tabId = message.optString("tabId")
 
           when (type) {
+            "PING" -> {
+              val pingReceiveTs = System.currentTimeMillis()
+              Log.d(TAG, "[PING_RECEIVE] instanceId=$instId generation=$gen reqPortGen=$reqPortGen requestId=$requestId ts=$pingReceiveTs")
+              val resp = JSONObject().apply {
+                put("type", "PING_RESULT")
+                put("ok", true)
+                put("pong", true)
+                put("requestId", requestId)
+                put("portGeneration", gen)
+                put("instanceId", instId)
+                put("receiveTs", pingReceiveTs)
+                put("deliveryTs", System.currentTimeMillis())
+              }
+              try {
+                p.postMessage(resp)
+              } catch (e: Exception) {
+                Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$gen failed to send PING_RESULT: ${e.message}")
+              }
+            }
+            "SHOULD_BLOCK" -> {
+              val startTs = System.currentTimeMillis()
+              val sourceUrl = message.optString("sourceUrl")
+              val initiator = message.optString("initiator")
+              val method = message.optString("method", "GET")
+              val aggressive = message.optBoolean("aggressive", false)
+              val thirdParty = message.optBoolean("thirdParty", true)
+              val resourceType = message.optString("resourceType", "other")
+
+              val isTrace = url.contains("google-analytics") || 
+                            url.contains("adblock-tester") || 
+                            url.contains("googletagmanager") || 
+                            url.contains("banner")
+
+              if (isTrace) {
+                Log.d(TAG, "[NM_NATIVE_RECEIVE] instanceId=$instId generation=$gen requestId=$requestId type=SHOULD_BLOCK ts=$startTs")
+                Log.d(TAG, "[NM_NATIVE_HANDLER_START] requestId=$requestId")
+              }
+
+              val sourceHost = try {
+                if (sourceUrl.isNotEmpty()) java.net.URI(sourceUrl).host?.lowercase()?.trim() else null
+              } catch (_: Exception) { null }
+              val bypass = sourceHost != null && siteSecurityProvider?.invoke(sourceHost) == true
+
+              val decision = if (bypass) {
+                BlockDecision(blocked = false, ruleId = "bypass", ruleSource = "SiteSecurityProvider")
+              } else {
+                adblockBridge.evaluateDecision(
+                  url = url,
+                  sourceUrl = sourceUrl,
+                  initiator = initiator,
+                  method = method,
+                  resourceType = resourceType,
+                  aggressive = aggressive,
+                  thirdParty = thirdParty,
+                  requestId = requestId
+                )
+              }
+              val endTs = System.currentTimeMillis()
+
+              val resp = JSONObject().apply {
+                put("type", "SHOULD_BLOCK_RESULT")
+                put("ok", true)
+                put("cancel", decision.blocked)
+                if (decision.ruleId != null) put("ruleId", decision.ruleId)
+                if (decision.ruleSource != null) put("ruleSource", decision.ruleSource)
+                put("generation", decision.engineGeneration)
+                put("requestId", requestId)
+                put("portGeneration", gen)
+                put("nativeStartTimestamp", startTs)
+                put("nativeEndTimestamp", endTs)
+                put("responseDeliveryTimestamp", System.currentTimeMillis())
+              }
+
+              if (isTrace) {
+                Log.d(TAG, "[NM_RESPONSE_CREATED] requestId=$requestId cancel=${decision.blocked} elapsed=${endTs - startTs}ms")
+              }
+
+              try {
+                p.postMessage(resp)
+              } catch (e: Exception) {
+                Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$gen failed to send SHOULD_BLOCK_RESULT: ${e.message}")
+              }
+
+              if (isTrace) {
+                Log.d(TAG, "[NM_RESPONSE_COMPLETE] type=SHOULD_BLOCK requestId=$requestId")
+              }
+            }
+            "GET_COSMETIC_RESOURCES" -> {
+              val hostname = message.optString("hostname")
+              val classesArray = message.optJSONArray("classes")
+              val idsArray = message.optJSONArray("ids")
+              val exceptionsArray = message.optJSONArray("exceptions")
+
+              val classes = mutableListOf<String>()
+              if (classesArray != null) {
+                for (i in 0 until classesArray.length()) classes.add(classesArray.getString(i))
+              }
+              val ids = mutableListOf<String>()
+              if (idsArray != null) {
+                for (i in 0 until idsArray.length()) ids.add(idsArray.getString(i))
+              }
+              val exceptions = mutableListOf<String>()
+              if (exceptionsArray != null) {
+                for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
+              }
+
+              val host = if (hostname.isNotEmpty()) hostname else try {
+                java.net.URI(if (url.contains("://")) url else "https://$url").host?.lowercase() ?: ""
+              } catch (_: Exception) { "" }
+
+              val isCosmeticAllowed = cosmeticPolicyProvider?.invoke(host) ?: true
+              val resp = if (!isCosmeticAllowed) {
+                JSONObject().apply {
+                  put("type", "COSMETIC_RESOURCES_RESULT")
+                  put("ok", true)
+                  put("generation", adblockBridge.getEngineGeneration())
+                  put("hideSelectors", org.json.JSONArray())
+                  put("forceHideSelectors", org.json.JSONArray())
+                  put("procedural", org.json.JSONArray())
+                  put("proceduralCount", 0)
+                  put("generics", false)
+                  put("requestId", requestId)
+                  put("portGeneration", gen)
+                }
+              } else {
+                val cosmetic = adblockBridge.getCosmeticResources(url, classes, ids, exceptions)
+                JSONObject().apply {
+                  put("type", "COSMETIC_RESOURCES_RESULT")
+                  put("ok", cosmetic.ok)
+                  put("generation", cosmetic.generation)
+                  put("hideSelectors", org.json.JSONArray(cosmetic.hideSelectors))
+                  put("forceHideSelectors", org.json.JSONArray(cosmetic.forceHideSelectors))
+                  put("procedural", org.json.JSONArray(cosmetic.procedural))
+                  put("proceduralCount", cosmetic.proceduralCount)
+                  put("generics", cosmetic.generics)
+                  if (cosmetic.error != null) put("error", cosmetic.error)
+                  put("requestId", requestId)
+                  put("portGeneration", gen)
+                }
+              }
+              try {
+                p.postMessage(resp)
+              } catch (e: Exception) {
+                Log.e(TAG, "[PORT_ERROR] Failed to send COSMETIC_RESOURCES_RESULT", e)
+              }
+            }
+            "GET_HIDDEN_CLASS_ID_SELECTORS" -> {
+              val startTs = System.currentTimeMillis()
+              Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_START] instanceId=$instId generation=$gen requestId=$requestId ts=$startTs")
+              val classesArray = message.optJSONArray("classes")
+              val idsArray = message.optJSONArray("ids")
+              val exceptionsArray = message.optJSONArray("exceptions")
+
+              val classes = mutableListOf<String>()
+              if (classesArray != null) {
+                for (i in 0 until classesArray.length()) classes.add(classesArray.getString(i))
+              }
+              val ids = mutableListOf<String>()
+              if (idsArray != null) {
+                for (i in 0 until idsArray.length()) ids.add(idsArray.getString(i))
+              }
+              val exceptions = mutableListOf<String>()
+              if (exceptionsArray != null) {
+                for (i in 0 until exceptionsArray.length()) exceptions.add(exceptionsArray.getString(i))
+              }
+
+              val res = adblockBridge.getHiddenClassIdSelectors(classes, ids, exceptions)
+              val endTs = System.currentTimeMillis()
+              Log.d(TAG, "[ADBLOCK_HIDDEN_SELECTORS_OK] instanceId=$instId generation=$gen requestId=$requestId elapsed=${endTs - startTs}ms")
+
+              val resp = JSONObject().apply {
+                put("type", "HIDDEN_SELECTORS_RESULT")
+                put("ok", res.ok)
+                put("generation", res.generation)
+                put("hideSelectors", org.json.JSONArray(res.hideSelectors))
+                if (res.error != null) put("error", res.error)
+                put("requestId", requestId)
+                put("portGeneration", gen)
+                put("nativeStartTimestamp", startTs)
+                put("nativeEndTimestamp", endTs)
+                put("responseDeliveryTimestamp", System.currentTimeMillis())
+              }
+              try {
+                p.postMessage(resp)
+              } catch (e: Exception) {
+                Log.e(TAG, "[PORT_ERROR] Failed to send HIDDEN_SELECTORS_RESULT", e)
+              }
+            }
+            "BLOCK_ELEMENT" -> {
+              val selector = message.optString("selector").trim()
+              val domain = message.optString("domain").trim()
+              val resp = if (selector.isNotEmpty()) {
+                val rule = if (domain.isNotEmpty()) "$domain##$selector" else "##$selector"
+                adblockBridge.addCustomRule(rule)
+                Log.i(TAG, "[ADBLOCK_CUSTOM_RULE] Added element block rule: $rule")
+                JSONObject().apply {
+                  put("type", "BLOCK_ELEMENT_RESULT")
+                  put("ok", true)
+                  put("rule", rule)
+                  put("generation", adblockBridge.getEngineGeneration())
+                  put("requestId", requestId)
+                  put("portGeneration", gen)
+                }
+              } else {
+                JSONObject().apply {
+                  put("type", "BLOCK_ELEMENT_RESULT")
+                  put("ok", false)
+                  put("error", "empty_selector")
+                  put("requestId", requestId)
+                  put("portGeneration", gen)
+                }
+              }
+              try {
+                p.postMessage(resp)
+              } catch (e: Exception) {
+                Log.e(TAG, "[PORT_ERROR] Failed to send BLOCK_ELEMENT_RESULT", e)
+              }
+            }
             "PORT_STATUS" -> {
               val role = message.optString("role", "AD_TRACKER_BLOCKER_ONLY")
               log("[WEBEXT] Port status: $status (role=$role)")
@@ -550,11 +783,14 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
       }
 
       override fun onDisconnect(p: WebExtension.Port) {
-        log("[WEBEXT] Native port disconnected")
+        val dTs = System.currentTimeMillis()
+        Log.d(TAG, "[PORT_DISCONNECT] instanceId=$instId generation=$gen ts=$dTs")
+        log("[WEBEXT] Native port disconnected (inst=$instId, gen=$gen)")
         synchronized(portLock) {
           if (activePort == p) {
             activePort = null
             _extensionState.value = ExtensionState.DISCONNECTED
+            portGeneration.incrementAndGet()
           }
         }
         pendingHtmlRequests.clear()

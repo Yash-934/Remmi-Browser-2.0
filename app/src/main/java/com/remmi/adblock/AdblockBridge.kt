@@ -589,21 +589,27 @@ class AdblockBridge {
 
     var compiledCount = 0
     val oldGen = getEngineGeneration()
+    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_START]")
+    Log.d(TAG, "[COMPILE_START] validLines=${validLines.size} oldGeneration=$oldGen")
     if (isNativeLoaded) {
       try {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_START]")
         val metricsJson = nativeCompileRules(combinedDefaultRulesText, additionalRulesText)
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_PARSE_DONE]")
         val metricsObj = org.json.JSONObject(metricsJson)
         compiledCount = metricsObj.optInt("parsedCandidates", 0)
         Log.i(TAG, "[ADBLOCK_METRICS] compile_metrics: $metricsJson")
+        com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_ENGINE_CREATED]")
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_OK]")
       } catch (e: Throwable) {
         com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[ADBLOCK_COMPILE_RULES_FAILED]")
         Log.e(TAG, "Native compile rules failed: ${e.message}", e)
       }
     }
+    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_START]")
     val newGen = localEngineGeneration.incrementAndGet()
     Log.d(TAG, "[ADBLOCK_ENGINE_SWAP] oldGeneration=$oldGen newGeneration=$newGen rules=$compiledCount")
+    com.remmi.browser.util.CrashHandlerHelper.recordNativeOp(op = "[COMPILE_SWAP_DONE]")
 
     blockedHostnames.clear()
     blockedSubstrings.clear()

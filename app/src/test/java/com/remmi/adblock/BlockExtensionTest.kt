@@ -319,4 +319,66 @@ class BlockExtensionTest {
       assertEquals("All requests in tier $tier must succeed", tier, successCount.get())
     }
   }
+
+  @Test
+  fun testSequentialRequestsAndPing() {
+    // Test 1: Single PING test
+    val pingMsg = JSONObject().apply {
+      put("type", "PING")
+      put("requestId", "port_ping_0")
+      put("portGeneration", 1L)
+    }
+    val pingResult = blockExtension.onMessage("remmi_engine_extension", pingMsg, mockSender)
+    val pingJson = extractResult(pingResult)
+    assertNotNull(pingJson)
+    assertTrue("PING must return ok: true", pingJson!!.optBoolean("ok"))
+    assertTrue("PING must return pong: true", pingJson.optBoolean("pong"))
+
+    // Test 2: 1 Single SHOULD_BLOCK request
+    val singleMsg = JSONObject().apply {
+      put("type", "SHOULD_BLOCK")
+      put("requestId", "single_req_1")
+      put("url", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js")
+      put("sourceUrl", "https://adblock-tester.com/")
+      put("resourceType", "script")
+      put("thirdParty", true)
+    }
+    val singleRes = extractResult(blockExtension.onMessage("remmi_engine_extension", singleMsg, mockSender))
+    assertNotNull(singleRes)
+    assertTrue("Ad script must be cancelled", singleRes!!.optBoolean("cancel"))
+
+    // Test 3: 5 Sequential SHOULD_BLOCK requests
+    for (i in 1..5) {
+      val isAd = i % 2 == 1
+      val url = if (isAd) "https://www.google-analytics.com/collect?v=$i" else "https://example.com/app_$i.js"
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "seq_5_$i")
+        put("url", url)
+        put("sourceUrl", "https://adblock-tester.com/")
+        put("resourceType", "script")
+        put("thirdParty", isAd)
+      }
+      val res = extractResult(blockExtension.onMessage("remmi_engine_extension", req, mockSender))
+      assertNotNull(res)
+      assertEquals("Cancel result for $url must match expectation", isAd, res!!.optBoolean("cancel"))
+    }
+
+    // Test 4: 10 Sequential SHOULD_BLOCK requests
+    for (i in 1..10) {
+      val isAd = i <= 5
+      val url = if (isAd) "https://stats.g.doubleclick.net/r/collect?i=$i" else "https://cdn.example.com/lib_$i.js"
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "seq_10_$i")
+        put("url", url)
+        put("sourceUrl", "https://adblock-tester.com/")
+        put("resourceType", "script")
+        put("thirdParty", isAd)
+      }
+      val res = extractResult(blockExtension.onMessage("remmi_engine_extension", req, mockSender))
+      assertNotNull(res)
+      assertEquals("Cancel result for $url in 10-seq must match expectation", isAd, res!!.optBoolean("cancel"))
+    }
+  }
 }
