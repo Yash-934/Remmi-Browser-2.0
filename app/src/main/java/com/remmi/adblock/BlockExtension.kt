@@ -471,6 +471,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
               }
               try {
                 p.postMessage(resp)
+                Log.d(TAG, "[PING_RESPONSE_SENT] nativeInstanceId=$instId jsInstanceId=$jsInstanceId reqPortGen=$reqPortGen requestId=$requestId ts=${System.currentTimeMillis()}")
               } catch (e: Exception) {
                 Log.e(TAG, "[PORT_ERROR] instanceId=$instId generation=$reqPortGen failed to send PING_RESULT: ${e.message}")
               }

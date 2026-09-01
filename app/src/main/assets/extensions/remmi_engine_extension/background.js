@@ -3,6 +3,7 @@
 // The WebExtension does NOT modify browser.proxy or route settings.
 
 // Port Health State Machine: DISCONNECTED -> CONNECTING -> CONNECTED -> HEALTHY / DEGRADED
+console.log("[JS_CONTEXT_RESTART] Background script loaded or restarted. Initializing state...");
 let port = null;
 let portState = "DISCONNECTED";
 let portGeneration = 0;
@@ -195,7 +196,7 @@ function connectNative() {
 
   portGeneration++;
   const currentGen = portGeneration;
-  const currentInst = ++portInstanceId;
+  const currentInst = ++jsInstanceId;
   const startTs = Date.now();
 
   logToNative(`[PORT_CONNECT_START] instanceId=${currentInst} generation=${currentGen} ts=${startTs}`);
