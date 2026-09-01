@@ -118,11 +118,15 @@ class PasswordManagerRepository private constructor(
       RemmiDatabase.databaseState.collect { dbState ->
         if (dbState is RemmiDatabase.DatabaseState.Ready) {
           try {
+            com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.REMMI_APP_PW_MANAGER_DB_QUERY_START)
             val metadata = dbState.database.masterKeyMetadataDao().getMetadata()
+            com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.REMMI_APP_PW_MANAGER_DB_QUERY_END)
             if (metadata == null) {
               _lockState.value = VaultLockState.Uninitialized
             }
-          } catch (_: Throwable) {}
+          } catch (_: Throwable) {
+             com.remmi.browser.util.CrashHandlerHelper.updateStartupPhase(context, com.remmi.browser.util.StartupPhase.REMMI_APP_PW_MANAGER_DB_QUERY_ERROR)
+          }
         }
       }
     }
