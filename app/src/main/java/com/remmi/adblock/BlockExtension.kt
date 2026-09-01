@@ -444,6 +444,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           val status = message.optString("status")
           val requestId = message.optString("requestId")
           val incomingGen = message.optLong("portGeneration", message.optLong("generation", 0L))
+          val jsInstanceId = message.optLong("jsInstanceId", message.optLong("instanceId", 0L))
           val reqPortGen = if (incomingGen > 0L) {
             activePortGeneration.set(incomingGen)
             incomingGen
@@ -455,7 +456,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
           when (type) {
             "PING" -> {
               val pingReceiveTs = System.currentTimeMillis()
-              Log.d(TAG, "[PING_RECEIVE] instanceId=$instId reqPortGen=$reqPortGen requestId=$requestId ts=$pingReceiveTs")
+              Log.d(TAG, "[PING_RECEIVE] nativeInstanceId=$instId jsInstanceId=$jsInstanceId reqPortGen=$reqPortGen requestId=$requestId ts=$pingReceiveTs")
               val resp = JSONObject().apply {
                 put("type", "PING_RESULT")
                 put("ok", true)
@@ -463,6 +464,7 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 put("requestId", requestId)
                 put("portGeneration", reqPortGen)
                 put("generation", reqPortGen)
+                put("jsInstanceId", jsInstanceId)
                 put("instanceId", instId)
                 put("receiveTs", pingReceiveTs)
                 put("deliveryTs", System.currentTimeMillis())
@@ -522,6 +524,8 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
                 put("generation", decision.engineGeneration)
                 put("requestId", requestId)
                 put("portGeneration", reqPortGen)
+                put("jsInstanceId", jsInstanceId)
+                put("instanceId", instId)
                 put("nativeStartTimestamp", startTs)
                 put("nativeEndTimestamp", endTs)
                 put("responseDeliveryTimestamp", System.currentTimeMillis())
@@ -674,7 +678,12 @@ class BlockExtension private constructor(private val adblockBridge: AdblockBridg
             }
             "PORT_STATUS" -> {
               val role = message.optString("role", "AD_TRACKER_BLOCKER_ONLY")
-              log("[WEBEXT] Port status: $status (role=$role, gen=$reqPortGen)")
+              Log.d(TAG, "[PORT_STATUS] nativeInstanceId=$instId jsInstanceId=$jsInstanceId generation=$reqPortGen status=$status role=$role ts=${System.currentTimeMillis()}")
+              log("[WEBEXT] Port status: $status (role=$role, jsInst=$jsInstanceId, gen=$reqPortGen)")
+            }
+            "DIAGNOSTICS_RESULT" -> {
+              val eventCount = message.optJSONArray("events")?.length() ?: 0
+              log("[WEBEXT] Diagnostics received: $eventCount events (gen=$reqPortGen)")
             }
             "CLICK_INSPECTION_RESULT" -> {
               val candidatesArray = message.optJSONArray("candidates")

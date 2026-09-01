@@ -6,33 +6,35 @@
 let port = null;
 let portState = "DISCONNECTED";
 let portGeneration = 0;
-let portInstanceId = 0;
+let jsInstanceId = 0;
 let isConnecting = false;
 let reconnectTimer = null;
 let reqSequence = 0;
 
 const pendingRequests = new Map();
-const pendingMessages = [];
 
-function logToNative(msg) {
-  if (port && (portState === "HEALTHY" || portState === "CONNECTED")) {
-    try {
-      port.postMessage({ type: "LOG", message: msg, action: "log", msg: msg });
-    } catch (_e) {}
+// Local In-Memory Diagnostic Ring Buffer (Max 200 events, strictly ZERO port IPC overhead)
+const MAX_DIAGNOSTIC_EVENTS = 200;
+const DIAGNOSTIC_RING_BUFFER = [];
+
+function recordDiagnostic(msg, extra = null) {
+  const entry = {
+    ts: Date.now(),
+    msg: typeof msg === "string" ? msg : JSON.stringify(msg)
+  };
+  if (extra) entry.extra = extra;
+  if (DIAGNOSTIC_RING_BUFFER.length >= MAX_DIAGNOSTIC_EVENTS) {
+    DIAGNOSTIC_RING_BUFFER.shift();
   }
+  DIAGNOSTIC_RING_BUFFER.push(entry);
+  try {
+    console.debug(`[Remmi Engine] ${entry.msg}`);
+  } catch (_e) {}
 }
 
-function flushPendingMessages() {
-  if (!port || portState !== "HEALTHY") return;
-  while (pendingMessages.length > 0) {
-    const msg = pendingMessages.shift();
-    try {
-      port.postMessage(msg);
-    } catch (_e) {
-      pendingMessages.unshift(msg);
-      break;
-    }
-  }
+function logToNative(msg) {
+  // STRICT PURIFICATION: In-memory logging only. NEVER call port.postMessage({type: "LOG"})!
+  recordDiagnostic(msg);
 }
 
 function isTraceCandidateUrl(url) {
@@ -62,6 +64,7 @@ function sendPortMessage(type, payload = {}, timeoutMs = 1500, timeoutErrorName 
     }
 
     const currentGen = portGeneration;
+    const currentInst = jsInstanceId;
     const reqId = `${type.toLowerCase()}_${++reqSequence}_${Date.now()}`;
     let isSettled = false;
 
@@ -91,6 +94,7 @@ function sendPortMessage(type, payload = {}, timeoutMs = 1500, timeoutErrorName 
       },
       timer: timer,
       portGeneration: currentGen,
+      jsInstanceId: currentInst,
       sendTs: Date.now(),
       type: type
     });
@@ -100,6 +104,8 @@ function sendPortMessage(type, payload = {}, timeoutMs = 1500, timeoutErrorName 
         type: type,
         requestId: reqId,
         portGeneration: currentGen,
+        generation: currentGen,
+        jsInstanceId: currentInst,
         ...payload
       });
     } catch (sendErr) {
@@ -126,7 +132,6 @@ async function executeInitialPing(instanceId, generation) {
         portState = "HEALTHY";
         logToNative(`[PING_SUCCESS] instanceId=${instanceId} generation=${generation} elapsedMs=${pingElapsed}`);
         logToNative(`[PORT_RECONNECT_SUCCESS] instanceId=${instanceId} generation=${generation} ts=${Date.now()}`);
-        flushPendingMessages();
       }
       return true;
     } else {
@@ -224,6 +229,7 @@ function connectNative() {
         type: "PORT_STATUS",
         status: "CONNECTED",
         role: "AD_TRACKER_BLOCKER_ONLY",
+        jsInstanceId: currentInst,
         instanceId: currentInst,
         portGeneration: currentGen,
         generation: currentGen
@@ -294,6 +300,20 @@ function connectNative() {
         }
       } else if (msg.type === "RUN_BENCHMARK") {
         runPingBenchmark(msg.count || 100);
+      } else if (msg.type === "GET_DIAGNOSTICS") {
+        if (port && (portState === "HEALTHY" || portState === "CONNECTED")) {
+          try {
+            port.postMessage({
+              type: "DIAGNOSTICS_RESULT",
+              requestId: msg.requestId || "",
+              portGeneration: currentGen,
+              events: DIAGNOSTIC_RING_BUFFER.slice(),
+              metrics: { ...BLOCKER_METRICS },
+              portState: portState,
+              rulesGeneration: rulesGeneration
+            });
+          } catch (_e) {}
+        }
       }
     });
 
@@ -414,11 +434,7 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (port && portState === "HEALTHY") {
       try {
         port.postMessage(payload);
-      } catch (_e) {
-        pendingMessages.push(payload);
-      }
-    } else {
-      pendingMessages.push(payload);
+      } catch (_e) {}
     }
     if (sendResponse) sendResponse({ received: true });
     return true;
@@ -541,6 +557,20 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     promise.then((res) => {
       if (sendResponse) sendResponse(res);
     });
+    return true;
+  }
+
+  if (message.type === "GET_DIAGNOSTICS") {
+    if (sendResponse) {
+      sendResponse({
+        ok: true,
+        events: DIAGNOSTIC_RING_BUFFER.slice(),
+        metrics: { ...BLOCKER_METRICS },
+        portState: portState,
+        portGeneration: portGeneration,
+        rulesGeneration: rulesGeneration
+      });
+    }
     return true;
   }
 

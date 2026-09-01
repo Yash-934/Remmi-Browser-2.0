@@ -518,4 +518,242 @@ class BlockExtensionTest {
     val isNewAccepted = (pingResp2.optLong("portGeneration") == pendingJsGen)
     assertTrue("New response with gen=2 MUST match JS pending request expecting gen=2", isNewAccepted)
   }
+
+  @Test
+  fun testZeroDiagnosticTrafficOnBlockingChannel() {
+    val receivedMessages = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+
+    class TestWebExtensionPort : WebExtension.Port() {
+      var internalDelegate: WebExtension.PortDelegate? = null
+      override fun setDelegate(d: WebExtension.PortDelegate?) {
+        this.internalDelegate = d
+      }
+      override fun postMessage(msgObj: JSONObject) {
+        receivedMessages.add(msgObj)
+      }
+    }
+
+    val mockPort = TestWebExtensionPort()
+    blockExtension.onConnect(mockPort)
+    val portDelegate = mockPort.internalDelegate
+    assertNotNull("Port delegate must be registered", portDelegate)
+
+    // Send initial status
+    portDelegate!!.onPortMessage(
+      JSONObject().apply {
+        put("type", "PORT_STATUS")
+        put("status", "CONNECTED")
+        put("portGeneration", 1L)
+      },
+      mockPort
+    )
+
+    // Execute 100 SHOULD_BLOCK requests
+    val count = 100
+    for (i in 0 until count) {
+      val isAd = (i % 2 == 0)
+      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://example.com/script_$i.js"
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "req_blocking_hotpath_$i")
+        put("url", url)
+        put("sourceUrl", "https://example.com")
+        put("resourceType", "script")
+        put("thirdParty", isAd)
+        put("portGeneration", 1L)
+      }
+      portDelegate.onPortMessage(req, mockPort)
+    }
+
+    // Verify exactly 100 responses, ALL must be SHOULD_BLOCK_RESULT, ZERO LOG messages
+    assertEquals("Must receive exactly 100 responses for 100 requests", count, receivedMessages.size)
+    val logMessages = receivedMessages.filter { it.optString("type") == "LOG" || it.optString("type") == "log" }
+    assertEquals("There must be ZERO LOG messages on the blocking port", 0, logMessages.size)
+
+    val resultTypes = receivedMessages.map { it.optString("type") }.toSet()
+    assertEquals("All responses must be SHOULD_BLOCK_RESULT", setOf("SHOULD_BLOCK_RESULT"), resultTypes)
+  }
+
+  @Test
+  fun testFailureHandlingNoDiagnosticIpcAmplification() {
+    val receivedMessages = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+
+    class TestWebExtensionPort : WebExtension.Port() {
+      var internalDelegate: WebExtension.PortDelegate? = null
+      override fun setDelegate(d: WebExtension.PortDelegate?) {
+        this.internalDelegate = d
+      }
+      override fun postMessage(msgObj: JSONObject) {
+        receivedMessages.add(msgObj)
+      }
+    }
+
+    val mockPort = TestWebExtensionPort()
+    blockExtension.onConnect(mockPort)
+    val portDelegate = mockPort.internalDelegate
+    assertNotNull("Port delegate must be registered", portDelegate)
+
+    // Execute 100 requests with empty or malformed parameters (failure cases)
+    val count = 100
+    for (i in 0 until count) {
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "req_fail_case_$i")
+        put("url", "") // empty URL failure case
+        put("portGeneration", 1L)
+      }
+      portDelegate!!.onPortMessage(req, mockPort)
+    }
+
+    // Verify exactly 100 responses and ZERO LOG message amplification
+    assertEquals("Must receive exactly 100 responses for 100 failure requests", count, receivedMessages.size)
+    val logMessages = receivedMessages.filter { it.optString("type") == "LOG" || it.optString("type") == "log" }
+    assertEquals("There must be ZERO diagnostic LOG messages produced on error", 0, logMessages.size)
+  }
+
+  @Test
+  fun testBackgroundJsContainsNoHotPathLogIpc() {
+    val paths = listOf(
+      "src/main/assets/extensions/remmi_engine_extension/background.js",
+      "app/src/main/assets/extensions/remmi_engine_extension/background.js"
+    )
+    val bgFile = paths.map { java.io.File(it) }.firstOrNull { it.exists() }
+    assertNotNull("background.js asset file must exist", bgFile)
+    val content = bgFile!!.readText()
+    // Verify logToNative does not postMessage({type:"LOG"})
+    assertFalse("background.js must not postMessage type LOG", content.contains("""port.postMessage({ type: "LOG""""))
+    assertFalse("background.js must not postMessage type 'LOG'", content.contains("""port.postMessage({type:"LOG""""))
+    assertFalse("background.js must not send WEBEXT_METRICS on port every 50 requests", content.contains("""type: "WEBEXT_METRICS""""))
+  }
+
+  @Test
+  fun testStrictPingFirstAndShouldBlockProof() {
+    val receivedMessages = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+
+    class TestWebExtensionPort : WebExtension.Port() {
+      var internalDelegate: WebExtension.PortDelegate? = null
+      override fun setDelegate(d: WebExtension.PortDelegate?) {
+        this.internalDelegate = d
+      }
+      override fun postMessage(msgObj: JSONObject) {
+        receivedMessages.add(msgObj)
+      }
+    }
+
+    val mockPort = TestWebExtensionPort()
+    blockExtension.onConnect(mockPort)
+    val portDelegate = mockPort.internalDelegate
+    assertNotNull("Port delegate must be registered", portDelegate)
+
+    // Helper for sending and capturing
+    fun sendAndCapture(msg: JSONObject): JSONObject {
+      receivedMessages.clear()
+      portDelegate!!.onPortMessage(msg, mockPort)
+      val resp = receivedMessages.poll()
+      assertNotNull("Must return response", resp)
+      return resp!!
+    }
+
+    // 1. Initial Handshake: PORT_STATUS
+    val statusMsg = JSONObject().apply {
+      put("type", "PORT_STATUS")
+      put("status", "CONNECTED")
+      put("jsInstanceId", 1)
+      put("portGeneration", 1L)
+      put("generation", 1L)
+    }
+    portDelegate!!.onPortMessage(statusMsg, mockPort)
+
+    // 2. Strict PING Handshake (Must be FIRST before any SHOULD_BLOCK)
+    val pingMsg = JSONObject().apply {
+      put("type", "PING")
+      put("requestId", "ping_proof_01")
+      put("portGeneration", 1L)
+      put("jsInstanceId", 1)
+    }
+    val pingResp = sendAndCapture(pingMsg)
+    assertTrue("PING must succeed", pingResp.optBoolean("ok"))
+    assertTrue("PING must return pong=true", pingResp.optBoolean("pong"))
+    assertEquals("PING portGeneration must match", 1L, pingResp.optLong("portGeneration"))
+    assertEquals("PING requestId must match", "ping_proof_01", pingResp.optString("requestId"))
+
+    // 3. Single SHOULD_BLOCK proof
+    val singleBlockMsg = JSONObject().apply {
+      put("type", "SHOULD_BLOCK")
+      put("requestId", "block_proof_single")
+      put("url", "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js")
+      put("sourceUrl", "https://example.com")
+      put("resourceType", "script")
+      put("thirdParty", true)
+      put("portGeneration", 1L)
+      put("jsInstanceId", 1)
+    }
+    val singleBlockResp = sendAndCapture(singleBlockMsg)
+    assertTrue("Single SHOULD_BLOCK ok must be true", singleBlockResp.optBoolean("ok"))
+    assertTrue("Single SHOULD_BLOCK must cancel ad", singleBlockResp.optBoolean("cancel"))
+    assertEquals("Single SHOULD_BLOCK generation must match", 1L, singleBlockResp.optLong("portGeneration"))
+
+    // 4. 10 Sequential requests proof
+    for (i in 0 until 10) {
+      val isAd = (i % 2 == 0)
+      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://example.com/item_$i.js"
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "seq10_req_$i")
+        put("url", url)
+        put("sourceUrl", "https://example.com")
+        put("resourceType", "script")
+        put("thirdParty", isAd)
+        put("portGeneration", 1L)
+      }
+      val resp = sendAndCapture(req)
+      assertTrue("Seq10 request $i must succeed", resp.optBoolean("ok"))
+      assertEquals("Seq10 request $i cancel must match", isAd, resp.optBoolean("cancel"))
+      assertEquals("Seq10 portGeneration must match", 1L, resp.optLong("portGeneration"))
+    }
+
+    // 5. 100 Sequential requests proof
+    for (i in 0 until 100) {
+      val isAd = (i % 2 == 0)
+      val url = if (isAd) "https://doubleclick.net/ad_$i.js" else "https://example.com/item_$i.js"
+      val req = JSONObject().apply {
+        put("type", "SHOULD_BLOCK")
+        put("requestId", "seq100_req_$i")
+        put("url", url)
+        put("sourceUrl", "https://example.com")
+        put("resourceType", "script")
+        put("thirdParty", isAd)
+        put("portGeneration", 1L)
+      }
+      val resp = sendAndCapture(req)
+      assertTrue("Seq100 request $i must succeed", resp.optBoolean("ok"))
+      assertEquals("Seq100 request $i cancel must match", isAd, resp.optBoolean("cancel"))
+    }
+
+    // 6. 100 Concurrent requests proof
+    receivedMessages.clear()
+    val executor = java.util.concurrent.Executors.newFixedThreadPool(16)
+    val futures = (0 until 100).map { i ->
+      executor.submit<Unit> {
+        val isAd = (i % 2 == 0)
+        val url = if (isAd) "https://doubleclick.net/ad_conc_$i.js" else "https://example.com/conc_$i.js"
+        val req = JSONObject().apply {
+          put("type", "SHOULD_BLOCK")
+          put("requestId", "conc100_req_$i")
+          put("url", url)
+          put("sourceUrl", "https://example.com")
+          put("resourceType", "script")
+          put("thirdParty", isAd)
+          put("portGeneration", 1L)
+        }
+        portDelegate!!.onPortMessage(req, mockPort)
+      }
+    }
+    futures.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+    executor.shutdown()
+
+    assertEquals("Must receive all 100 concurrent responses", 100, receivedMessages.size)
+    val concurrentLogCount = receivedMessages.filter { it.optString("type") == "LOG" }.size
+    assertEquals("Concurrent test must generate zero LOG messages", 0, concurrentLogCount)
+  }
 }
